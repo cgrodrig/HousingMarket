@@ -29,6 +29,7 @@ library(ggplot2)
 library(kableExtra)
 library(corrplot)
 library(tidyverse)
+library(stringr)
 library(GGally)
 library(gridExtra)
 library(reshape)
@@ -46,37 +47,408 @@ library(forecast)
 library(MASS)
 ```
 
-## 0. Import, Clean & Merge Data
+## 0. Import
 
 ```{r}
 housesales <- read.csv("kaupskra.csv", header=T, fill=T, dec=",", sep=";", fileEncoding = 'UTF-8-BOM')
 
-# convert date column to date format
-housesales$utgdag <- as.Date(housesales$utgdag, format = "%Y-%m-%d %H:%M:%OS")
+```
 
-housesales_c <- housesales %>% 
-  mutate(einflm = as.numeric(einflm)*0.1,
-         kaupverd = as.numeric(kaupverd)*1000,
-         fasteignamat = as.numeric(fasteignamat)*1000,
-         byggar = 2023 - byggar) %>% 
-  mutate(outcome = kaupverd - fasteignamat) %>%
-  dplyr::select(-c(faerslunumer, emnr, skjalanumer, fastnum, heimilisfang, heinum, svfn, sveitarfelag, thinglystdags, kaupverd, fasteignamat, fepilog, lod_flm, lod_flmein, fullbuid, onothaefur_samningur)) %>%
-  filter(!is.na(byggar))
 
-colnames(housesales_c) <- c('postalcode','date', 'age', 'msq', 'type', 'outcome')
+## 0. Clean
+'postalcode','date',  'sellingprice', 'appraisal', 'age', 'msq', 'type', 'outcome'
 
-housesales_s <- subset(housesales_c, type %in% c("Fjölbýli      ", "Einbýli       ", "Sérbýli       "))
+```{r}
+Housesales <- housesales %>%
+  na.omit() %>%
+  mutate(
+    einflm = as.numeric(einflm) * 0.1,
+    kaupverd = as.numeric(kaupverd) * 1000,
+    fasteignamat = as.numeric(fasteignamat) * 1000,
+    byggar = as.numeric(byggar),
+    utgdag = ymd_hms(utgdag)
+  ) %>%
+  filter(byggar != 0) %>%
+  filter(einflm > 25 & einflm < 200) %>%
+  unite(ID,
+        fepilog,
+        heimilisfang,
+        postnr,
+        einflm,
+        byggar,
+        utgdag,
+        tegund,
+        sep = "_") %>%
+  group_by(ID) %>%
+  summarise(
+    kaupverd = mean(kaupverd, na.rm = TRUE),
+    fasteignamat = mean(fasteignamat, na.rm = TRUE),
+    Count = n()
+  ) %>%
+  separate(
+    ID,
+    into = c(
+      "fepilog",
+      "heimilisfang",
+      "postnr",
+      "einflm",
+      "byggar",
+      "utgdag",
+      "tegund"
+    ),
+    sep = "_"
+  ) %>%
+  mutate(outcome = (kaupverd - fasteignamat) / kaupverd) %>%
+  group_by(utgdag) %>%
+  mutate(inventory = n())
 
-housesales_f <- filter(housesales_s, msq > 20 & msq < 200 )
 
-head(housesales_f)
+Housesales$einflm <- as.numeric(Housesales$einflm)
+Housesales$byggar <- as.numeric(Housesales$byggar)
+Housesales$kaupverd <- as.numeric(Housesales$kaupverd)
+
+Housesales
+
+
+
 
 ```
 
-### Rental Price, Rental Inventory, Meters Squared, and # of bedrooms
+#### Missingness
+```{r}
+Housesales %>%
+  plot_missing()
+```
+
+
+#### Scatterplots
+Assumptions for a linear model 
+Linearity: All of the relationships between the independent variables and the dependent variable are not linear, so the change in the dependent variable is not proportional to the change in each independent variable.
+```{r}
+Housesales %>% 
+  ggplot(aes(x = einflm, y = outcome)) +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  stat_cor(r.accuracy = 0.01, p.accuracy = 0.001) +
+  theme_bw() 
+
+Housesales %>% 
+  ggplot(aes(x = byggar, y = outcome)) +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  stat_cor(r.accuracy = 0.01, p.accuracy = 0.001) +
+  theme_bw() 
+
+Housesales %>% 
+  ggplot(aes(x = kaupverd, y = outcome)) +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  stat_cor(r.accuracy = 0.01, p.accuracy = 0.001) +
+  theme_bw() 
+
+Housesales %>% 
+  ggplot(aes(x = fasteignamat, y = outcome)) +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  stat_cor(r.accuracy = 0.01, p.accuracy = 0.001) +
+  theme_bw() 
+```
+
+#### Outlier Analysis
+
+Look for outliers in the original data before taking the means and medians below. 
+```{r}
+boxplot(Housesales$einflm)
+boxplot(Housesales$byggar)
+boxplot(Housesales$kaupverd)
+boxplot(Housesales$fasteignamat)
+```
+
+##### Detailed Outlier Analysis
+
+```{r}
+#Housesales$outcome_p = Housesales$outcome - min(Housesales$outcome) +100
+Housesales$nuvirdi = abs(Housesales$outcome)  #because the lm function does not work on zero values
+fit_realscale <- lm(nuvirdi ~ postnr + einflm + byggar + inventory, Housesales)
+#boxcox(fit_realscale, plotit=T, lambda = seq(-0.05, 0.25, len = 30))
+#lambda_opt <- fit_realscale$lambda
+```
+
+```{r}
+diag_realscale <- fortify(fit_realscale)
+preal <- ggplot(diag_realscale, aes(x=.fitted,y=nuvirdi))+geom_point()
+preal <- preal + xlab("Fitted") + ylab("Nuvirdi") + labs(title = "Nuvirdi vs. fitted values")
+preal
+```
+
+```{r}
+Housesales$index2 <- c(1:length(Housesales$nuvirdi))
+set.seed(123)
+train <- sample_frac(Housesales, 3/4)
+test <- Housesales[-train$index2,]
+train_index <- c(1:length(train$nuvirdi))
+train$index <- train_index 
+test_index <- c(1:length(test$nuvirdi))
+test$index <- test_index 
+fit <- lm(nuvirdi ~ postnr + einflm + byggar + inventory, Housesales)
+```
+
+```{r}
+diag <- fortify(fit)
+diag$.index = c(1:length(diag$.resid))
+diag$.jack<-rstudent(fit)
+```
+
+##### Residuals
+```{r}
+res_sd <- summary(fit)$sigma
+fit$sigma
+```
+```{r}
+res_index <- ggplot(diag, aes(x = seq(1:length(.resid)), y = .resid)) + geom_point()
+res_index <- res_index + geom_hline(yintercept = 0, col = "red", linetype = "dashed")
+res_index <- res_index + geom_hline(yintercept = 2 * res_sd, col = "blue", linetype = "dashed")
+res_index <- res_index + geom_hline(yintercept = -2 * res_sd, col = "blue",
+linetype = "dashed")
+res_index <- res_index + geom_hline(yintercept = 3 * res_sd, col = "green",
+linetype = "dashed")
+res_index <- res_index + geom_hline(yintercept = -3 * res_sd, col = "green",
+linetype = "dashed")
+res_index <- res_index + xlab("Index") + ylab("Residuals") + labs(title = "Index plot of residuals")
+res_index <- res_index + geom_text(aes(label = ifelse(abs(.resid) > 2 * res_sd,
+.index, "")), hjust = -0.5, vjust = 0.4)
+res_index
+which(abs(diag$.resid)>2 * res_sd)
+```
+
+##### Leverage
+```{r}
+p<-length(coef(fit))
+n<-length(fitted(fit))
+lev_index<-ggplot(diag, aes(x=seq(1:length(.hat)),y=.hat))+geom_point()
+lev_index<-lev_index+geom_hline(yintercept=2*p/n, col="red", linetype="dashed")
+lev_index<-lev_index+xlab("Index")+ylab("Leverages")
+lev_index<-lev_index+geom_text(aes(label=ifelse(.hat>2*p/n,.index,"")),hjust=0, vjust=0)
+lev_index
+which(diag$.hat>2*p/n)
+```
+
+##### Studentized
+```{r}
+Stres_sd <- sd(diag$.stdresid, na.rm = TRUE)
+p3 <- ggplot(diag,aes(x=seq(1:length(.stdresid)),y=.stdresid))+geom_point()
+p3 <- p3 + geom_hline(yintercept=0, col="red", linetype="dashed")
+p3 <- p3 + geom_hline(yintercept=2*Stres_sd, col="blue", linetype="dashed")
+p3 <- p3 + geom_hline(yintercept=-2*Stres_sd, col="blue", linetype="dashed")
+p3 <- p3 + geom_hline(yintercept=3*Stres_sd, col="green", linetype="dashed")
+p3 <- p3 + geom_hline(yintercept=-3*Stres_sd, col="green", linetype="dashed")
+p3 <- p3 + xlab("Index")+ylab("Studentized residuals")+labs(title = "Index plot of std.")
+p3 <- p3 + geom_text(aes(label=ifelse(abs(.stdresid)>2*Stres_sd,.index,"")),hjust=-0.5, vjust=0.4)
+p3
+which(abs(diag$.stdresid)>2*Stres_sd)
+```
+
+##### qqplot studentized residuals
+```{r}
+df <- length(diag$.stdresid) - length(summary(fit)$coefficients[,1])
+stdres <- diag$.stdresid[!is.na(diag$.stdresid)]
+tqqplot(stdres,df)
+```
+##### Jacknife Residuals
+```{r}
+# Add jackknife residuals to diag dataframe
+diag$.jack <- rstudent(fit) 
+jackres <- diag$.jack[!is.na(diag$.jack)]
+jackindex <- diag$.index[!is.na(diag$.jack)]
+
+
+# Jackknife index plot
+p4<-ggplot(diag, aes(x=seq(1:length(.jack)),y=.jack, na.rm = TRUE))+geom_point()
+p4<-p4+geom_hline(yintercept=0, col="red", linetype="dashed")
+p4<-p4+xlab("Index")+ylab("Jackknife residuals")
+p4<-p4+geom_text(aes(label=ifelse(abs(.jack)>3,.index,"")),hjust=-0.1)
+p4
+which(diag$.jack>3)
+```
+
+##### qqplot jacknife residuals
+```{r}
+df <- length(jackres) - length(summary(fit)$coefficients[,1]) - 1
+tqqplot(jackres,df)
+```
+If the model violates some of the assumptions of linear regression (such as normality or homoscedasticity), the Jackknife and studentized residuals may not always identify the same influential observations.
+
+
+##### Bonferroni Correction & Outlier test
+
+Test if points number no. 5344 6983 7085 7087 are outliers by computing the probability of having a larger absolute value than this observation. Degrees of freedom of the Jackknife residuals are n−1−p=13344-1-4= 13339
+```{r}
+prob5344 <- 2*(1 - pt(abs(diag$.jack[5344]),df))
+prob6983 <- 2*(1 - pt(abs(diag$.jack[6983]),df))
+prob7085 <- 2*(1 - pt(abs(diag$.jack[7085]),df))
+prob7087 <- 2*(1 - pt(abs(diag$.jack[7087]),df))
+
+alpha <- 0.05
+bonf <- alpha/length(diag$.jack)
+bonfprob <- c(prob5344,prob6983,prob7085,prob7087,bonf)
+(bonfprob)
+
+bonfprob_v <- bonfprob < bonf
+print(bonfprob_v)
+
+```
+All 4 points have a p-value smaller than the Bonferroni corrected significance level, thus, they should be considered as outliers.
+
+
+
+
+##### Cook's Distance
+
+```{r}
+p5 <- ggplot(diag, aes(x=seq(1:length(.cooksd)),y=.cooksd, na.rm = TRUE))+geom_point()
+p5 <- p5 + xlab("Index")+ylab("Cooks distance") + theme(legend.position="none")
+p5 <- p5 + geom_text(aes(label=ifelse(abs(.cooksd)>0.021,.index,"")))
+p5
+
+which(diag$.cooksd >0.021)
+# 6983 7085 7087
+```
+
+Points 6983 7085 7087 are both Cook's Distance outliers and bonferroni corrected outliers. 
+
+##### Closer Look at the outliers
+
+```{r}
+fit_cooks1 <- lm(nuvirdi ~ postnr + einflm + byggar + inventory, Housesales[-6983,])
+relative_beta_cooks1 = abs(fit$coefficients - fit_cooks1$coefficients)/summary(fit)$coefficients[,2]
+
+fit_cooks2 <- lm(nuvirdi ~ postnr + einflm + byggar + inventory, Housesales[-7085,])
+relative_beta_cooks2 = abs(fit$coefficients - fit_cooks2$coefficients)/summary(fit)$coefficients[,2]
+
+fit_cooks3 <- lm(nuvirdi ~ postnr + einflm + byggar + inventory, Housesales[-7087,])
+relative_beta_cooks3 = abs(fit$coefficients - fit_cooks3$coefficients)/summary(fit)$coefficients[,2]
+
+```
+
+
+The absolute change in the parameter estimates with respect to the standard error of each parameter when points no. 6983 7085 7087 are removed. These points have substantial influence on several of the coefficients.
+```{r}
+((relative_beta_cooks1))
+which(relative_beta_cooks1 > 1)
+((relative_beta_cooks2))
+which(relative_beta_cooks2 > 1)
+((relative_beta_cooks3))
+which(relative_beta_cooks3 > 1)
+```
+
+#incomplete
+```{r}
+predict_verd_train <- exp(predict(fit,train))
+predict_verd_train_cooks1 <- exp(predict(fit_cooks1,train))
+perc_pred_cooks1 = sort(100*abs(predict_verd_train - predict_verd_train_cooks1)/abs(predict_verd_train),decreasing=TRUE)
+(perc_pred_cooks1[1:8])
+```
+
+## 1. Housesales_by_date
+
+```{r}
+Housesales_by_date <- Housesales %>%
+  ungroup() %>%
+  mutate(tegund = gsub(" ", "", tegund)) %>%
+  filter(tegund %in% c("Einbýli", "Fjölbýli", "Sérbýli")) %>%
+  mutate(einflm = as.numeric(einflm),
+         byggar = as.numeric(byggar)) %>%
+  group_by(utgdag) %>%
+  summarise(
+    byggar_mean = mean(byggar, na.rm = TRUE),
+    byggar_median = median(byggar, na.rm = TRUE),
+    einflm_mean = mean(einflm, na.rm = TRUE),
+    einflm_median = median(einflm, na.rm = TRUE),
+    outcome_mean = mean(outcome, na.rm = TRUE),
+    inventory = n()
+  ) %>% 
+  mutate(across(where(is.numeric), round, 2))
+
+Housesales_by_date
+
+```
+
+### Numerical data
+
+```{r fig.height=11, fig.width=11}
+Housesales_by_date %>% 
+  plot_histogram()
+```
+
+### Categorical 
+
+```{r}
+Housesales_by_date %>% 
+  plot_bar()
+```
+
+
+## 1. Housesales_by_date_pc
+
+```{r}
+Housesales_by_date_pc <- Housesales %>%
+  ungroup() %>%
+  mutate(tegund = gsub(" ", "", tegund)) %>%
+  filter(tegund %in% c("Einbýli", "Fjölbýli", "Sérbýli")) %>%
+  mutate(einflm = as.numeric(einflm),
+         byggar = as.numeric(byggar)) %>%
+  group_by(utgdag, postnr) %>%
+  summarise(
+    byggar_mean = mean(byggar, na.rm = TRUE),
+    byggar_median = median(byggar, na.rm = TRUE),
+    einflm_mean = mean(einflm, na.rm = TRUE),
+    einflm_median = median(einflm, na.rm = TRUE),
+    outcome_mean = mean(outcome, na.rm = TRUE),
+    inventory = n()
+  ) %>% 
+  ungroup() %>% 
+  mutate(across(where(is.numeric), round, 2))
+
+PostNr <- Housesales_by_date_pc %>%
+  count(postnr) %>% 
+  mutate(postnr = as.numeric(postnr)) %>% 
+  filter(between(postnr, 100, 299) | between(postnr, 600, 699)) %>% 
+  filter(n > 1000) %>% 
+  arrange(-n) %>% 
+  pull(postnr)
+  
+
+Housesales_by_date_pc %>%
+  filter(postnr %in% PostNr) %>% 
+  distinct(postnr)
+
+Housesales_by_date_pc
+
+```
+
+### Numerical data
+
+```{r fig.height=11, fig.width=11}
+Housesales_by_date_pc %>% 
+  plot_histogram()
+```
+
+### Categorical 
+
+```{r}
+Housesales_by_date_pc %>% 
+  plot_bar()
+```
+
+
+## 0. Clean: Rental Price, Rental Inventory, Meters Squared, and # of bedrooms
 
 ```{r}
 rentalprice <-read.csv("leiguskra.csv", header=T, fill=T, dec=",", sep=",", fileEncoding = 'UTF-8-BOM')
+
+#NAs are found in postnr & byggar
+rentalprice %>% 
+  plot_missing()
 
 # convert date column to date format
 rentalprice$UTGDAG <- as.Date(rentalprice$UTGDAG, format = "%Y-%m-%d %H:%M:%OS")
@@ -90,15 +462,21 @@ colnames(rentalprice_c) <- c('POSTALCODE', 'PRICE', 'SIZE', 'TYPE', 'date')
 
 rentalprice_s <- subset(rentalprice_c, TYPE %in% c("Fjölbýli", "Einbýli", "Sérbýli"))
 
-rentalprice_f <- filter(rentalprice_s, SIZE > 20 & SIZE < 200 )
+rentalprice_f <- filter(rentalprice_s, SIZE > 25 & SIZE < 200 )
+
+summary(rentalprice_f$PRICE)
+rentalprice_f <- filter(rentalprice_f, PRICE < 400000  )
 
 head(rentalprice_f)
   
 ```
 
-### Interest
+## 0.Clean: Interest
 ```{r}
 interest <-read.csv("meginvextir_US_Date.csv", header=T, fill=T, dec=",", sep=";")
+
+interest %>% 
+  plot_missing()
 
 interest_c <- interest %>% 
   mutate(date = ymd(date))
@@ -133,6 +511,21 @@ full_data %>%
   plot_histogram()
 ```
 
+### Bootstrapping
+```{r}
+hist(housesales_g$msq)
+tmp_mean <- replicate(10000, mean(sample(housesales_g$msq, replace=T), na.rm=T))
+quantile(tmp_mean, 0.025)
+quantile(tmp_mean, 0.975)
+hist(tmp_mean)
+
+
+tmp_med <- replicate(10000, mean(sample(housesales_g$outcome, replace=T), na.rm=T))
+quantile(tmp_med, 0.025)
+quantile(tmp_med, 0.975)
+hist(tmp_med)
+```
+
 
 ### Categorical 
 
@@ -151,8 +544,53 @@ boxplot(full_data$mean_PRICE)
 boxplot(full_data$mean_SIZE)
 ```
 
+## Scatterplot & Transformations
 ```{r}
-fit1 <- lm(mean_outcome ~ mean_interest_rate + mean_age + mean_msq + mean_PRICE + mean_SIZE, data=full_data)
+full_data$mean_outcomeT = full_data$mean_outcome - min(full_data$mean_outcome) +100
+model <- lm(mean_outcomeT ~ . - date, full_data)
+boxcox(model)
+
+full_data %>% 
+  ggplot(aes(x = mean_interest_rate, y = mean_outcomeT)) +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  stat_cor(r.accuracy = 0.01, p.accuracy = 0.001) +
+  theme_bw() 
+
+full_data %>% 
+  ggplot(aes(x = mean_age, y = mean_outcomeT)) +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  stat_cor(r.accuracy = 0.01, p.accuracy = 0.001) +
+  theme_bw() 
+
+full_data %>% 
+  ggplot(aes(x = mean_msq, y = mean_outcomeT)) +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  stat_cor(r.accuracy = 0.01, p.accuracy = 0.001) +
+  theme_bw() 
+
+full_data %>% 
+  ggplot(aes(x = mean_PRICE, y = mean_outcomeT)) +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  stat_cor(r.accuracy = 0.01, p.accuracy = 0.001) +
+  theme_bw() 
+
+full_data %>% 
+  ggplot(aes(x = mean_SIZE, y = mean_outcomeT)) +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  stat_cor(r.accuracy = 0.01, p.accuracy = 0.001) +
+  theme_bw() 
+```
+
+
+```{r}
+
+full_data$cubed <- (full_data$mean_outcome)^(1/3)
+fit1 <- lm(cubed ~ mean_interest_rate + mean_age + mean_msq + mean_PRICE + mean_SIZE, data=full_data)
 summary(fit1)
 vif(fit1)
 plot(fit1)
@@ -164,8 +602,32 @@ full_data %>%
 ```
 
 ```{r}
+#without cubic root transformation
+fit1 <- lm(mean_outcome ~ mean_interest_rate + mean_age + mean_msq + mean_PRICE + mean_SIZE, data=full_data)
+summary(fit1)
+vif(fit1)
+plot(fit1)
+
+full_data1$index2 <- c(1:length(full_data1$mean_msq))
+
+set.seed(3689)
+train <- sample_frac(full_data1, 3/4)
+test <- full_data1[-train$index2,]
+
+train_index <- c(1:length(train$mean_msq))
+train$index <- train_index 
+test_index <- c(1:length(test$mean_msq))
+test$index <- test_index 
+
+diag_realscale <- fortify(fit1)
+preal <- ggplot(diag_realscale, aes(x=.fitted,y=mean_outcome))+geom_point()
+preal <- preal + xlab("Fitted") + ylab("Nuvirdi") + labs(title = "Nuvirdi vs. fitted values")
+preal
+```
+
+```{r}
 full_data1 <- full_data %>% 
-  dplyr::rename(nuvirdi = mean_outcome)
+  dplyr::rename(nuvirdi = cubed)
 
 full_data1$index2 <- c(1:length(full_data1$mean_msq))
 
@@ -192,7 +654,7 @@ preal
 ```
 
 ```{r}
-cor(train)>0.9
+cor(train[2:7])>0.9
 ```
 
 ```{r}
@@ -204,6 +666,7 @@ diag$.jack<-rstudent(fit)
 res_sd <- summary(fit)$sigma
 fit$sigma
 ```
+## Extreme points
 ```{r}
 res_index <- ggplot(diag, aes(x = seq(1:length(.resid)), y = .resid)) + geom_point()
 res_index <- res_index + geom_hline(yintercept = 0, col = "red", linetype = "dashed")
@@ -218,9 +681,44 @@ res_index <- res_index + xlab("Index") + ylab("Residuals") + labs(title = "Index
 res_index <- res_index + geom_text(aes(label = ifelse(abs(.resid) > 2 * res_sd,
 .index, "")), hjust = -0.5, vjust = 0.4)
 res_index
+
+unique(ifelse(abs(diag$.resid)>2 * res_sd, diag$.index, ""))
+which(abs(diag$.resid)>2 * res_sd)
 ```
-extreme residuals: 1628, 141, 1653, 785, 813, 1465, 980, 179, 802
-extreme residuals: 2125, 1124, 1277, 1572, 1746, 2016, 731, 1273, 
+## Leverage
+```{r}
+p<-length(coef(fit))
+n<-length(fitted(fit))
+lev_index<-ggplot(diag, aes(x=seq(1:length(.hat)),y=.hat))+geom_point()
+lev_index<-lev_index+geom_hline(yintercept=2*p/n, col="red", linetype="dashed")
+lev_index<-lev_index+xlab("Index")+ylab("Leverages")
+lev_index<-lev_index+geom_text(aes(label=ifelse(.hat>2*p/n,.index,"")),hjust=0, vjust=0)
+lev_index
+which(diag$.hat>2*p/n)
+```
+
+## studentized 
+```{r}
+Stres_sd <- sd(diag$.stdresid, na.rm = TRUE)
+p3 <- ggplot(diag,aes(x=seq(1:length(.stdresid)),y=.stdresid))+geom_point()
+p3 <- p3 + geom_hline(yintercept=0, col="red", linetype="dashed")
+p3 <- p3 + geom_hline(yintercept=2*Stres_sd, col="blue", linetype="dashed")
+p3 <- p3 + geom_hline(yintercept=-2*Stres_sd, col="blue", linetype="dashed")
+p3 <- p3 + geom_hline(yintercept=3*Stres_sd, col="green", linetype="dashed")
+p3 <- p3 + geom_hline(yintercept=-3*Stres_sd, col="green", linetype="dashed")
+p3 <- p3 + xlab("Index")+ylab("Studentized residuals")+labs(title = "Index plot of std.")
+p3 <- p3 + geom_text(aes(label=ifelse(abs(.stdresid)>2*Stres_sd,.index,"")),hjust=-0.5, vjust=0.4)
+p3
+which(abs(diag$.stdresid)>2*Stres_sd)
+```
+
+```{r}
+df <- length(diag$.stdresid) - length(summary(fit)$coefficients[,1])
+stdres <- diag$.stdresid[!is.na(diag$.stdresid)]
+tqqplot(stdres,df)
+
+hist(stdres)
+```
 
 
 ### timeseries 
