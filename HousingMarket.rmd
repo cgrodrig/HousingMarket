@@ -52,6 +52,27 @@ library(MASS)
 ```{r}
 housesales <- read.csv("kaupskra.csv", header=T, fill=T, dec=",", sep=";", fileEncoding = 'UTF-8-BOM')
 
+# boxplot
+bp <- boxplot(as.numeric(housesales$einflm))
+
+# histogram
+hist(as.numeric(housesales$einflm))
+
+# quantiles
+quantile(as.numeric(housesales$einflm))
+
+# outliers
+bp$out
+
+length(bp$out)
+
+summary(bp$out)
+
+housesales %>% 
+  mutate(einflm = as.numeric(einflm)) %>% 
+  filter(!einflm %in% bp$out) %>% 
+  ggplot(aes(y = einflm)) +
+  geom_boxplot()
 ```
 
 
@@ -98,7 +119,7 @@ Housesales <- housesales %>%
     ),
     sep = "_"
   ) %>%
-  mutate(outcome = (kaupverd - fasteignamat) / kaupverd) %>%
+  mutate(outcome = (kaupverd - fasteignamat) / fasteignamat) %>%
   group_by(utgdag) %>%
   mutate(inventory = n())
 
@@ -113,6 +134,15 @@ Housesales
 
 
 ```
+
+```{r}
+Housesales_trial <-Housesales %>% 
+  mutate(log_sellingprice= log(kaupverd), 
+         log_respropm2 =log(as.numeric(einflm)),
+         byggar = 2023-(ifelse(byggar > 1986, 1986, byggar)))
+
+```
+
 
 #### Missingness
 ```{r}
@@ -167,30 +197,16 @@ boxplot(Housesales$fasteignamat)
 ##### Detailed Outlier Analysis
 
 ```{r}
-#Housesales$outcome_p = Housesales$outcome - min(Housesales$outcome) +100
-Housesales$nuvirdi = abs(Housesales$outcome)  #because the lm function does not work on zero values
-fit_realscale <- lm(nuvirdi ~ postnr + einflm + byggar + inventory, Housesales)
-#boxcox(fit_realscale, plotit=T, lambda = seq(-0.05, 0.25, len = 30))
-#lambda_opt <- fit_realscale$lambda
-```
-
-```{r}
-diag_realscale <- fortify(fit_realscale)
-preal <- ggplot(diag_realscale, aes(x=.fitted,y=nuvirdi))+geom_point()
-preal <- preal + xlab("Fitted") + ylab("Nuvirdi") + labs(title = "Nuvirdi vs. fitted values")
-preal
-```
-
-```{r}
-Housesales$index2 <- c(1:length(Housesales$nuvirdi))
+Housesales_trial$nuvirdi = Housesales_trial$outcome
+Housesales_trial$index2 <- c(1:length(Housesales_trial$nuvirdi))
 set.seed(123)
-train <- sample_frac(Housesales, 3/4)
-test <- Housesales[-train$index2,]
+train <- sample_frac(Housesales_trial, 3/4)
+test <- Housesales_trial[-train$index2,]
 train_index <- c(1:length(train$nuvirdi))
 train$index <- train_index 
 test_index <- c(1:length(test$nuvirdi))
 test$index <- test_index 
-fit <- lm(nuvirdi ~ postnr + einflm + byggar + inventory, Housesales)
+fit <- lm(nuvirdi ~ postnr + einflm + byggar + inventory, train)
 ```
 
 ```{r}
@@ -199,11 +215,24 @@ diag$.index = c(1:length(diag$.resid))
 diag$.jack<-rstudent(fit)
 ```
 
+```{r}
+diag_realscale <- fortify(fit)
+preal <- ggplot(diag_realscale, aes(x=.fitted,y=nuvirdi))+geom_point()
+preal <- preal + xlab("Fitted") + ylab("Nuvirdi") + labs(title = "Nuvirdi vs. fitted values")
+preal
+```
+##### Correlation\
+```{r}
+cor(train[,c("nuvirdi", "einflm", "byggar","inventory")])>0.9
+```
+
+
 ##### Residuals
 ```{r}
 res_sd <- summary(fit)$sigma
 fit$sigma
 ```
+
 ```{r}
 res_index <- ggplot(diag, aes(x = seq(1:length(.resid)), y = .resid)) + geom_point()
 res_index <- res_index + geom_hline(yintercept = 0, col = "red", linetype = "dashed")
@@ -218,7 +247,7 @@ res_index <- res_index + xlab("Index") + ylab("Residuals") + labs(title = "Index
 res_index <- res_index + geom_text(aes(label = ifelse(abs(.resid) > 2 * res_sd,
 .index, "")), hjust = -0.5, vjust = 0.4)
 res_index
-which(abs(diag$.resid)>2 * res_sd)
+which(abs(diag$.resid)>3 * res_sd)
 ```
 
 ##### Leverage
@@ -230,7 +259,7 @@ lev_index<-lev_index+geom_hline(yintercept=2*p/n, col="red", linetype="dashed")
 lev_index<-lev_index+xlab("Index")+ylab("Leverages")
 lev_index<-lev_index+geom_text(aes(label=ifelse(.hat>2*p/n,.index,"")),hjust=0, vjust=0)
 lev_index
-which(diag$.hat>2*p/n)
+which(diag$.hat>2*p/n) #maybe try 3?
 ```
 
 ##### Studentized
@@ -245,30 +274,39 @@ p3 <- p3 + geom_hline(yintercept=-3*Stres_sd, col="green", linetype="dashed")
 p3 <- p3 + xlab("Index")+ylab("Studentized residuals")+labs(title = "Index plot of std.")
 p3 <- p3 + geom_text(aes(label=ifelse(abs(.stdresid)>2*Stres_sd,.index,"")),hjust=-0.5, vjust=0.4)
 p3
-which(abs(diag$.stdresid)>2*Stres_sd)
+which(abs(diag$.stdresid)>3*Stres_sd)
 ```
 
 ##### qqplot studentized residuals
 ```{r}
-df <- length(diag$.stdresid) - length(summary(fit)$coefficients[,1])
+df <- length(diag$.stdresid) - length(summary(fit)$coefficients[, 1])
 stdres <- diag$.stdresid[!is.na(diag$.stdresid)]
-tqqplot(stdres,df)
+tqqplot(stdres, df)
 ```
 ##### Jacknife Residuals
 ```{r}
 # Add jackknife residuals to diag dataframe
-diag$.jack <- rstudent(fit) 
+diag$.jack <- rstudent(fit)
 jackres <- diag$.jack[!is.na(diag$.jack)]
 jackindex <- diag$.index[!is.na(diag$.jack)]
 
 
 # Jackknife index plot
-p4<-ggplot(diag, aes(x=seq(1:length(.jack)),y=.jack, na.rm = TRUE))+geom_point()
-p4<-p4+geom_hline(yintercept=0, col="red", linetype="dashed")
-p4<-p4+xlab("Index")+ylab("Jackknife residuals")
-p4<-p4+geom_text(aes(label=ifelse(abs(.jack)>3,.index,"")),hjust=-0.1)
+p4 <-
+  ggplot(diag, aes(
+    x = seq(1:length(.jack)),
+    y = .jack,
+    na.rm = TRUE
+  )) + geom_point()
+p4 <- p4 + geom_hline(yintercept = 0,
+                      col = "red",
+                      linetype = "dashed")
+p4 <- p4 + xlab("Index") + ylab("Jackknife residuals")
+p4 <-
+  p4 + geom_text(aes(label = ifelse(abs(.jack) > 3, .index, "")), hjust =
+                   -0.1)
 p4
-which(diag$.jack>3)
+which(diag$.jack > 3)
 ```
 
 ##### qqplot jacknife residuals
@@ -283,21 +321,28 @@ If the model violates some of the assumptions of linear regression (such as norm
 
 Test if points number no. 5344 6983 7085 7087 are outliers by computing the probability of having a larger absolute value than this observation. Degrees of freedom of the Jackknife residuals are n−1−p=13344-1-4= 13339
 ```{r}
-prob5344 <- 2*(1 - pt(abs(diag$.jack[5344]),df))
-prob6983 <- 2*(1 - pt(abs(diag$.jack[6983]),df))
-prob7085 <- 2*(1 - pt(abs(diag$.jack[7085]),df))
-prob7087 <- 2*(1 - pt(abs(diag$.jack[7087]),df))
+jack <- which(diag$.jack > 3)
+j = 1
+x = c()
+for (i in jack) {
+  x[j] <- 2 * (1 - pt(abs(diag$.jack[i]), df))
+  j = j + 1
+}
 
 alpha <- 0.05
-bonf <- alpha/length(diag$.jack)
-bonfprob <- c(prob5344,prob6983,prob7085,prob7087,bonf)
+bonf <- alpha / length(diag$.jack)
+bonfprob <- c(x, bonf)
 (bonfprob)
 
 bonfprob_v <- bonfprob < bonf
 print(bonfprob_v)
 
+cbind(jack, bonfprob_v)
+which(bonfprob_v == 1)
+outliers_jack = jack[which(bonfprob_v == 1)]
+
 ```
-All 4 points have a p-value smaller than the Bonferroni corrected significance level, thus, they should be considered as outliers.
+57 points have a p-value smaller than the Bonferroni corrected significance level, thus, they should be considered as outliers.
 
 
 
@@ -310,44 +355,145 @@ p5 <- p5 + xlab("Index")+ylab("Cooks distance") + theme(legend.position="none")
 p5 <- p5 + geom_text(aes(label=ifelse(abs(.cooksd)>0.021,.index,"")))
 p5
 
-which(diag$.cooksd >0.021)
-# 6983 7085 7087
+cook <- which(diag$.cooksd >0.021)
+
+#intersection between cook and outliers_jack
+intersection <- intersect(outliers_jack, cook)
+print(intersection)
+
 ```
 
-Points 6983 7085 7087 are both Cook's Distance outliers and bonferroni corrected outliers. 
+
+Points 1866 8097 8147 8851 9258 9746 are both Cook's Distance outliers and bonferroni corrected outliers. 
 
 ##### Closer Look at the outliers
 
 ```{r}
-fit_cooks1 <- lm(nuvirdi ~ postnr + einflm + byggar + inventory, Housesales[-6983,])
-relative_beta_cooks1 = abs(fit$coefficients - fit_cooks1$coefficients)/summary(fit)$coefficients[,2]
+#Repeat this code for the 6 points: 1866 8097 8147 8851 9258 9746
 
-fit_cooks2 <- lm(nuvirdi ~ postnr + einflm + byggar + inventory, Housesales[-7085,])
-relative_beta_cooks2 = abs(fit$coefficients - fit_cooks2$coefficients)/summary(fit)$coefficients[,2]
+outliers_6 <- c(1866,8097, 8147, 8851, 9258, 9746)
 
-fit_cooks3 <- lm(nuvirdi ~ postnr + einflm + byggar + inventory, Housesales[-7087,])
-relative_beta_cooks3 = abs(fit$coefficients - fit_cooks3$coefficients)/summary(fit)$coefficients[,2]
+#create empty list vectors to hold the results
+#fit_cooks <- vector("list", length(outliers_6))
+#relative_beta_cooks <- vector("list", length(outliers_6))
+
+for (j in seq_along(outliers_6)){
+  fit_cooks <- lm(nuvirdi ~ postnr + einflm + byggar + inventory, train[-outliers_6[j],])
+  
+relative_beta_cooks = abs(fit$coefficients - fit_cooks$coefficients)/summary(fit)$coefficients[,2]
+
+#no exp because we do not have a log transformation
+predict_verd_train <- (predict(fit,train))
+predict_verd_train_cooks <- (predict(fit_cooks,train))
+perc_pred_cooks = sort(100*abs(predict_verd_train - predict_verd_train_cooks)/abs(predict_verd_train),decreasing=TRUE)
+(perc_pred_cooks[1:100])
+print(perc_pred_cooks[1:100])
+}
+  
+
 
 ```
 
 
-The absolute change in the parameter estimates with respect to the standard error of each parameter when points no. 6983 7085 7087 are removed. These points have substantial influence on several of the coefficients.
+
+##### residuals vs. fitted values 
 ```{r}
-((relative_beta_cooks1))
-which(relative_beta_cooks1 > 1)
-((relative_beta_cooks2))
-which(relative_beta_cooks2 > 1)
-((relative_beta_cooks3))
-which(relative_beta_cooks3 > 1)
+p6<- ggplot(diag, aes(x=.fitted,y=.resid))+geom_point()
+p6 <- p6+stat_smooth(method="loess",se=F)+
+geom_hline(yintercept=0, col="red", linetype="dashed")
+res_sd <- summary(fit)$sigma
+p6 <- p6 + geom_hline(yintercept = 0, col = "red", linetype = "dashed")
+p6 <- p6 + geom_hline(yintercept = 2 * res_sd, col = "blue", linetype = "dashed")
+p6 <- p6 + geom_hline(yintercept = -2 * res_sd, col = "blue",
+linetype = "dashed")
+p6 <- p6 + geom_hline(yintercept = 3 * res_sd, col = "green",
+linetype = "dashed")
+p6 <- p6 + geom_hline(yintercept = -3 * res_sd, col = "green",
+linetype = "dashed")
+p6 <- p6 + xlab("Fitted") + ylab("Residuals") + labs(title = "Residuals vs. fitted values")
+p6 <- p6 + geom_text(aes(label = ifelse(abs(.resid) > 2 * res_sd,
+.index, "")), hjust = -0.5, vjust = 0.4)
+p6
 ```
 
-#incomplete
+
+
+
 ```{r}
-predict_verd_train <- exp(predict(fit,train))
-predict_verd_train_cooks1 <- exp(predict(fit_cooks1,train))
-perc_pred_cooks1 = sort(100*abs(predict_verd_train - predict_verd_train_cooks1)/abs(predict_verd_train),decreasing=TRUE)
-(perc_pred_cooks1[1:8])
+p6<- ggplot(diag, aes(x=einflm,y=.resid))+geom_point()
+p6 <- p6+stat_smooth(method="loess",se=F)+
+geom_hline(yintercept=0, col="red", linetype="dashed")
+res_sd <- summary(fit)$sigma
+p6 <- p6 + geom_hline(yintercept = 0, col = "red", linetype = "dashed")
+p6 <- p6 + geom_hline(yintercept = 2 * res_sd, col = "blue", linetype = "dashed")
+p6 <- p6 + geom_hline(yintercept = -2 * res_sd, col = "blue",
+linetype = "dashed")
+p6 <- p6 + geom_hline(yintercept = 3 * res_sd, col = "green",
+linetype = "dashed")
+p6 <- p6 + geom_hline(yintercept = -3 * res_sd, col = "green",
+linetype = "dashed")
+p6 <- p6 + xlab("size(m2)") + ylab("Residuals") + labs(title = "Residuals vs. size of property")
+p6 <- p6 + geom_text(aes(label = ifelse(abs(.resid) > 2 * res_sd,
+.index, "")), hjust = -0.5, vjust = 0.4)
+p6
 ```
+
+```{r}
+p6<- ggplot(diag, aes(x=byggar,y=.resid))+geom_point()
+p6 <- p6+stat_smooth(method="loess",se=F)+
+geom_hline(yintercept=0, col="red", linetype="dashed")
+res_sd <- summary(fit)$sigma
+p6 <- p6 + geom_hline(yintercept = 0, col = "red", linetype = "dashed")
+p6 <- p6 + geom_hline(yintercept = 2 * res_sd, col = "blue", linetype = "dashed")
+p6 <- p6 + geom_hline(yintercept = -2 * res_sd, col = "blue",
+linetype = "dashed")
+p6 <- p6 + geom_hline(yintercept = 3 * res_sd, col = "green",
+linetype = "dashed")
+p6 <- p6 + geom_hline(yintercept = -3 * res_sd, col = "green",
+linetype = "dashed")
+p6 <- p6 + xlab("year property was constructed(yr)") + ylab("Residuals") + labs(title = "Residuals vs. year property was constructed")
+p6 <- p6 + geom_text(aes(label = ifelse(abs(.resid) > 2 * res_sd,
+.index, "")), hjust = -0.5, vjust = 0.4)
+p6
+```
+
+
+
+
+```{r}
+p6<- ggplot(diag, aes(x=inventory,y=.resid))+geom_point()
+p6 <- p6+stat_smooth(method="loess",se=F)+
+geom_hline(yintercept=0, col="red", linetype="dashed")
+res_sd <- summary(fit)$sigma
+p6 <- p6 + geom_hline(yintercept = 0, col = "red", linetype = "dashed")
+p6 <- p6 + geom_hline(yintercept = 2 * res_sd, col = "blue", linetype = "dashed")
+p6 <- p6 + geom_hline(yintercept = -2 * res_sd, col = "blue",
+linetype = "dashed")
+p6 <- p6 + geom_hline(yintercept = 3 * res_sd, col = "green",
+linetype = "dashed")
+p6 <- p6 + geom_hline(yintercept = -3 * res_sd, col = "green",
+linetype = "dashed")
+p6 <- p6 + xlab("available properties for sale") + ylab("Residuals") + labs(title = "Residuals vs. available properties for sale")
+p6 <- p6 + geom_text(aes(label = ifelse(abs(.resid) > 2 * res_sd,
+.index, "")), hjust = -0.5, vjust = 0.4)
+p6
+```
+
+
+```{r}
+train2 <- train[-outliers_jack,]
+train2mod <- lm(log(nuvirdi+10) ~ postnr + log(einflm) + log(byggar) + log(inventory), data = train2)
+summary(train2mod)
+plot(train2mod)
+```
+
+```{r}
+boxplot(train2$einflm)
+boxplot(train2$byggar)
+boxplot(train2$kaupverd)
+boxplot(train2$fasteignamat)
+```
+
 
 ## 1. Housesales_by_date
 
