@@ -485,6 +485,7 @@ train2 <- train[-outliers_jack,]
 train2mod <- lm(log(nuvirdi+10) ~ postnr + log(einflm) + log(byggar) + log(inventory), data = train2)
 summary(train2mod)
 plot(train2mod)
+hist(train2mod$residuals)# normality isnt the problem
 ```
 
 ```{r}
@@ -493,6 +494,26 @@ boxplot(train2$byggar)
 boxplot(train2$kaupverd)
 boxplot(train2$fasteignamat)
 ```
+
+
+
+```{r}
+plot(train2mod)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 ## 1. Housesales_by_date
