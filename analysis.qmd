@@ -1,0 +1,200 @@
+---
+title: "analysis"
+format: html
+editor: visual
+---
+
+# Setup
+
+## Load libraries
+
+```{r}
+library(tidyverse)
+library(DataExplorer)
+library(writexl)
+library(stats)
+library(ggpubr)
+library(rstatix)
+library(car)
+```
+
+## Load data
+
+```{r}
+data <- get(load("Full_cleaned_data.RData"))
+data
+```
+
+# Data cleaning
+
+Variables:
+1 Property Type = tegund
+2 POA = outcome
+3 Municipality = sveitarfelag
+4 Meters Squared = einflm
+5 Property Age = age
+6 Price per Meter Squared = fm_verd
+7 Other Properties for Sale in the same municipality & month & year = Sales
+8 Available Rental Properties of the same month, year, and municipality = Inventory
+
+```{r}
+
+#data <- rename(data, `Property Type` = tegund, `POA` = outcome, Municipality = sveitarfelag, `Meters Squared` = einflm, `Property Age` = age, `Price per Meter Squared` = fm_verd, `Other Properties for Sale` = Sales, `Available Rental Properties` = Inventory)
+
+data %>% 
+  glimpse()
+```
+
+# EDA
+
+## Correlation Matrix
+
+```{r, fig.height=8, fig.width=8}
+data %>% 
+  plot_correlation()
+```
+
+## Scatterplot Matrix
+
+```{r}
+
+data %>% 
+  #sample_n(5000) %>% 
+  dplyr::select(!where(is.factor), -Date) %>% 
+  pivot_longer(!outcome) %>% 
+  ggplot(aes(x = value, y = outcome)) +
+  geom_point(color = "gray", shape =16, alpha = 0.5) +
+  geom_smooth() +
+  geom_smooth(method = "lm", color = "red") +
+  stat_cor(method = "pearson", cor.coef.name = "r", r.accuracy = 0.01, p.accuracy = 0.001) +
+  theme_test() +
+  facet_wrap(~name, scales = "free_x")
+```
+
+```{r}
+cor.test(data$outcome, data$age)
+```
+
+### poa vs. tegund "Einbýli", "Fjölbýli", "Sérbýli" boxplot
+
+```{r}
+ggplot(data = data, aes(x = tegund, y = outcome)) + 
+  geom_boxplot() + 
+  facet_wrap(~tegund, scales = "free_x") + 
+  xlab("Property Type") + 
+  ylab("Appraisal Gap %") + 
+  ggtitle("Appraisal Gap % vs Property Type")
+```
+
+### fm_verd and poa
+
+```{r}
+ggplot(data, aes(x = fm_verd, y = outcome, color = tegund)) +
+  geom_point() +
+  xlab("Price Per Meter Squared") +
+  ylab("Appraisal Gap %") +
+  ggtitle("Price Per Meter Squared vs. Appraisal Gap % by Property Type") +
+  scale_color_discrete(name = "Property Type")
+```
+
+### einflm vs. poa by tegund
+
+```{r}
+ggplot(data, aes(x = einflm, y = outcome, color = tegund)) +
+  geom_point() +
+  xlab("meters squared") +
+  ylab("Appraisal Gap %") +
+  ggtitle("Property size vs. Appraisal Gap % by Property Type") +
+  scale_color_discrete(name = "Property Type")
+```
+
+### einflm vs. poa by municipality
+
+```{r}
+ggplot(data, aes(x = einflm, y = outcome, color = sveitarfelag)) +
+  geom_point() +
+  xlab("meters squared") +
+  ylab("Appraisal Gap %") +
+  ggtitle("Property size vs Appraisal Gap % by Municipality") +
+  scale_color_discrete(name = "Municipality")
+```
+
+### age vs. POA by tegund
+
+```{r}
+ggplot(data, aes(x = age, y = outcome, color = tegund)) +
+  geom_point() +
+  xlab("Property Age") +
+  ylab("Appraisal Gap %") +
+  ggtitle("Property Age vs Appraisal Gap % by Property Type") +
+  scale_color_discrete(name = "Property Type")
+```
+
+### einflm vs. poa by municipality
+
+```{r}
+data %>% 
+  ggplot(aes(x = einflm, y = outcome)) +
+  geom_line(color = "red") +
+  #geom_line(aes(x = einflm, y = outcome), data = housesales_c, color = "blue") + 
+  labs(x = NULL, y = NULL) +
+  facet_wrap(~sveitarfelag, scales = "free_y") +
+  theme_test()
+```
+
+### age vs poa by municipality
+
+```{r}
+data %>% 
+  ggplot(aes(x = age, y = outcome)) +
+  geom_line(color = "red") +
+  #geom_line(aes(x = age, y = outcome), data = housesales_c, color = "blue") +
+  labs(x = NULL, y = NULL) +
+  facet_wrap(~sveitarfelag, scales = "free_y") +
+  theme_test()
+```
+
+### DATE VS. FM_VERD VS. SVEITARFELAG
+
+```{r}
+
+data %>% 
+  ggplot(aes(x = Date, y = fm_verd, color = sveitarfelag)) +
+  geom_line() +
+  facet_wrap(~sveitarfelag) +
+  theme_test() +
+  theme(legend.position = "none")+ 
+  labs(y = "Price Per Meter Squared")
+
+```
+
+### DATE VS. outcome VS. SVEITARFELAG
+
+```{r}
+
+data %>% 
+  ggplot(aes(x = Date, y = outcome, color = sveitarfelag)) +
+  geom_line() +
+  facet_wrap(~sveitarfelag) +
+  theme_test() +
+  theme(legend.position = "none")+ 
+  labs(y = "Appraisal Gap %")
+
+```
+# modeling
+
+```{r}
+
+data_modeling <- data %>%
+  select(c(outcome, tegund , sveitarfelag , einflm , age , Sales , Month , Year , DoM , Inventory , interest_rate)) 
+
+data_modeling %>%
+  plot_correlation()
+
+model1 <- lm(outcome ~ tegund + einflm + age + Sales + Month + Year + DoM + Inventory + interest_rate, data)
+summary(model1)
+vif(model1)
+
+```
+
+
