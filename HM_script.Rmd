@@ -1,0 +1,2444 @@
+---
+title: "HM_Script"
+output: html_document
+date: "2023-07-15"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load libraries
+
+```{r, include=FALSE}
+library(dplyr)
+library(lubridate)
+library(ggpubr)
+library(DataExplorer)
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(kableExtra)
+library(corrplot)
+library(tidyverse)
+library(stringr)
+library(GGally)
+library(gridExtra)
+library(reshape)
+library(groupdata2)
+library(skimr)
+library(patchwork)
+library(reshape)
+library(sjPlot)
+library(jtools)
+library(zoo)
+library(data.table)
+library(car)
+library(tseries)
+library(forecast)
+library(MASS)
+library(caret)
+library(devtools)
+library(VennDiagram)
+library(apaTables)
+library(knitr)
+library(gt)
+library(mice)
+library(writexl)
+
+
+```
+
+### 0. Import
+```{r}
+housesales0 <-
+  read.csv(
+    "kaupskra.csv",
+    header = T,
+    fill = T,
+    dec = ",",
+    sep = ";",
+    fileEncoding = 'UTF-8-BOM'
+  )
+
+head(housesales0)
+```
+
+### Data Clean
+# housesales_c
+```{r include=FALSE}
+
+municipalities <-
+  c(
+    "Gardabaer",
+    "Kopavogsbaer",
+    "Hafnarfjardarkaupstadur",
+    "Mosfellsbaer",
+    "Seltjarnarnesbaer",
+    "Reykjavikurborg"
+  )
+
+
+housesales <- housesales0 %>%
+  dplyr::mutate(tegund = gsub(" ", "", tegund),
+                sveitarfelag = gsub(" ", "", sveitarfelag))  %>%
+  filter(
+    fullbuid == 1 &
+      onothaefur_samningur == 0 &
+      sveitarfelag %in% municipalities & #limitation 3
+      tegund %in% c('Einbyli', 'Fjolbyli', 'Serbyli') #Limitation 1
+  )
+
+# Check if there are any cells with value 0 in the variable fasteignamat
+any(housesales$fasteignamat == 0)
+# Convert cells with value 0 to NA in the variable fasteignamat
+housesales$fasteignamat[housesales$fasteignamat == 0] <- NA
+
+
+housesales <- housesales %>%
+  dplyr::mutate(
+    sveitarfelag = as.factor(sveitarfelag), 
+    tegund= as.factor(tegund),
+    kaupverd = as.numeric(kaupverd) * 1000,
+    fasteignamat = as.numeric(fasteignamat) * 1000,
+    outcome = (kaupverd - fasteignamat) / fasteignamat, #POA
+    fm_verd=(kaupverd/einflm),
+    age = 2023.5 - byggar,
+    #age
+    date = dmy_hm(thinglystdags),
+    Date = as_date(date),
+    ROWID = row_number()
+  ) %>% 
+  relocate(ROWID)
+
+housesales_c <- housesales %>% 
+  dplyr::select(ROWID, "Date", "tegund", "kaupverd", "fasteignamat", "outcome", "sveitarfelag", "einflm", "age", fm_verd) %>%
+  filter(age < 100, einflm >= 20) %>% # Limitation 2 and 4
+  mutate(einflm = as.numeric(einflm)) %>%
+  arrange(sveitarfelag, Date) %>%
+  group_by(sveitarfelag, Date) %>%
+  mutate(Sales = n()) %>%
+  ungroup()
+
+summary(housesales_c)
+```
+
+# Model Fitting
+
+# Model Fiting 2
+
+## Outcome
+### train & test split
+
+```{r}
+housesales_c$nuvirdi = housesales_c$outcome
+housesales_c$index2 <- c(1:length(housesales_c$nuvirdi))
+
+set.seed(123) #sets the seed for random number generation
+train <- sample_frac(housesales_c, 3/4) # split data into train and test
+test <- housesales_c[-train$index2,]
+train_index <- c(1:length(train$nuvirdi)) #assign indices to each data point
+train$index <- train_index 
+test_index <- c(1:length(test$nuvirdi)) #assign indices to each data point
+test$index <- test_index 
+```
+
+### lm 1 outcome
+```{r}
+fit <- lm(nuvirdi ~ tegund + sveitarfelag + einflm + age, train) #model
+summary(fit)
+vif(fit)
+```
+
+
+### RSS ESS TSS
+```{r}
+
+
+
+fitted_values <- fitted(fit)
+mean_response <- mean(fit$residuals)
+RSS1 <- sum((fitted_values - mean_response)^2)
+RSS1
+
+residuals <- fit$residuals
+ESS1 <- sum(residuals^2)
+ESS1
+
+TSS1 <- ESS1 + RSS1
+TSS1
+
+anova(fit)
+```
+#### fit scaled
+
+```{r}
+fit_scaled <- lm(nuvirdi ~ tegund + sveitarfelag + scale(einflm) + scale(age), train) 
+summary(fit_scaled)
+```
+
+```{r}
+diag <- fortify(fit)
+diag$.index = c(1:length(diag$.resid)) 
+#  new column .index in the diag data frame and assigns it values ranging from 1 to the number of elements in the residuals of the model (.resid)
+
+diag$.jack<-rstudent(fit) 
+#a new column .jack in the diag data frame and assigns it the jackknife residuals of the model, obtained using the rstudent() function 
+```
+ 
+##### FIG1A
+```{r}
+fit <- lm(nuvirdi ~ tegund + sveitarfelag + einflm + age, train) #model
+diag_realscale <- fortify(fit) # makes lm info easier to use because it converts the lm object to a dataframe
+
+fit1 <- lm(nuvirdi ~ .fitted, data = diag_realscale)
+summary(fit1)
+intercept <- coef(fit1)[1]
+slope <- coef(fit1)[2]
+
+best_fit_line <- intercept + slope * diag_realscale$`.fitted`
+#slope times the predicted values of the dataset aka (.fitted)
+
+preal <- ggplot(diag_realscale, aes(x = .fitted, y = nuvirdi)) + geom_point()
+preal <- preal + xlab("Predicted Values") + ylab("Outcome") + labs(title = "Scatterplot of Outcome vs. Predicted Values")
+preal <- preal + geom_line(aes(x = diag_realscale$`.fitted`, y = best_fit_line), color = "red")
+preal 
+
+ggsave("FIG1A.png", preal, dpi = 300, width = 8, height = 6, units = "in")
+```
+
+
+
+#### Multicollinearity between the numerical variables in the model fit
+
+```{r}
+train_subset <- train[,c("nuvirdi", "einflm", "age")]
+train_subset <- train_subset[complete.cases(train_subset),]
+cor(train_subset) > 0.9
+```
+
+
+
+#### Standard Residuals
+```{r}
+res_sd <- summary(fit)$sigma #residual std of the lm fit
+fit$sigma
+```
+sigma represents the difference between the observed response values and the values predicted by the model
+
+##### FIG 2A
+```{r}
+res_index <- ggplot(diag, aes(x = seq(1:length(.resid)), y = .resid)) + geom_point()
+res_index <- res_index + geom_hline(yintercept = 0, col = "red", linetype = "dashed")
+res_index <- res_index + geom_hline(yintercept = 2 * res_sd, col = "blue", linetype = "dashed")
+res_index <- res_index + geom_hline(yintercept = -2 * res_sd, col = "blue",
+linetype = "dashed")
+res_index <- res_index + geom_hline(yintercept = 3 * res_sd, col = "green",
+linetype = "dashed")
+res_index <- res_index + geom_hline(yintercept = -3 * res_sd, col = "green",
+linetype = "dashed")
+res_index <- res_index + xlab("Index") + ylab("Standard Residuals") + labs(title = "Index plot of standardized residuals")
+res_index <- res_index + geom_text(aes(label = ifelse(abs(.resid) > 2 * res_sd,
+.index, "")), hjust = -0.5, vjust = 0.4)
+res_index
+outcome_std_res <- which(abs(diag$.resid)>3 * res_sd)
+sum(abs(diag$.resid)>3 * res_sd)
+standardizedres2 <- length(diag$.resid)
+ggsave("FIG2A.png", res_index, dpi = 300, width = 8, height = 6, units = "in")
+```
+
+#### Leverage
+##### FIG 3A 
+```{r}
+p<-length(coef(fit)) # number of parameters
+n<-length(fitted(fit)) # number of observations
+lev_index<-ggplot(diag, aes(x=seq(1:length(.hat)),y=.hat))+geom_point()
+#.hat values are the leverages 
+
+lev_index<-lev_index+geom_hline(yintercept=2*p/n, col="red", linetype="dashed")
+lev_index<-lev_index+xlab("Index")+ylab("Leverages")
+lev_index<-lev_index+geom_text(aes(label=ifelse(.hat>2*p/n,.index,"")),hjust=0, vjust=0)
+lev_index
+outcome_leverage <- which(diag$.hat>2*p/n) #maybe try 3?
+sum(diag$.hat>2*p/n)
+
+ggsave("FIG3A.png", lev_index, dpi = 300, width = 8, height = 6, units = "in")
+```
+
+
+##### Studentized
+
+##### fig4A
+```{r}
+Stres_sd <- sd(diag$.stdresid, na.rm = TRUE)
+p3 <- ggplot(diag,aes(x=seq(1:length(.stdresid)),y=.stdresid))+geom_point()
+p3 <- p3 + geom_hline(yintercept=0, col="red", linetype="dashed")
+p3 <- p3 + geom_hline(yintercept=2*Stres_sd, col="blue", linetype="dashed")
+p3 <- p3 + geom_hline(yintercept=-2*Stres_sd, col="blue", linetype="dashed")
+p3 <- p3 + geom_hline(yintercept=3*Stres_sd, col="green", linetype="dashed")
+p3 <- p3 + geom_hline(yintercept=-3*Stres_sd, col="green", linetype="dashed")
+p3 <- p3 + xlab("Index")+ylab("Studentized residuals")+labs(title = "Index plot of Studentized residuals.")
+p3 <- p3 + geom_text(aes(label=ifelse(abs(.stdresid)>2*Stres_sd,.index,"")),hjust=-0.5, vjust=0.4)
+p3
+outcome_student_res <- which(abs(diag$.stdresid)>3*Stres_sd)
+sum(abs(diag$.stdresid)>3*Stres_sd)
+
+ggsave("FIG4A.png", p3, dpi = 300, width = 8, height = 6, units = "in")
+```
+
+##### Jacknife Residuals
+#### fig5A
+```{r}
+# Add jackknife residuals to diag dataframe
+diag$.jack <- rstudent(fit)
+jackres <- diag$.jack[!is.na(diag$.jack)]
+jackindex <- diag$.index[!is.na(diag$.jack)]
+
+
+# Jackknife index plot
+p4 <-
+  ggplot(diag, aes(
+    x = seq(1:length(.jack)),
+    y = .jack,
+    na.rm = TRUE
+  )) + geom_point()
+p4 <- p4 + geom_hline(yintercept = 0,
+                      col = "red",
+                      linetype = "dashed")
+p4 <- p4 + xlab("Index") + ylab("Jackknife residuals")
+p4 <-
+  p4 + geom_text(aes(label = ifelse(abs(.jack) > 3, .index, "")), hjust =
+                   -0.1)
+p4
+outcome_jack_res <- which(diag$.jack > 3)
+sum(diag$.jack > 3)
+
+ggsave("FIG5A.png", p4, dpi = 300, width = 8, height = 6, units = "in")
+```
+
+##### Bonferroni Correction & Hypothesis testing
+
+```{r}
+jack <- which(diag$.jack > 3) # indices of the jack residuals that are greater than 3 
+df <- length(jackres) - length(summary(fit)$coefficients[,1]) - 1
+
+j = 1
+x = c() # empty vector to store all of the pvalues that represent the probability of observing a value equal to or more extreme than the absolute value of each jackknife residual
+
+for (i in jack) {
+  x[j] <- 2 * (1 - pt(abs(diag$.jack[i]), df))
+  # two-tailed p-value for the observation's absolute value of "diag$.jack[i]" is calculated using the "pt()" function and scaled by 2
+  
+  j = j + 1
+}
+
+alpha <- 0.05 #normal alpha level
+bonf <- alpha / length(diag$.jack) #bonferroni corrected alpha level
+bonfprob <- c(x, bonf)
+
+bonfprob_v <- bonfprob < bonf # which pval are smaller than the bonferroni corrected alpha 
+
+#cbind(jack, bonfprob_v) # 1 is smaller, 0 is not smaller 
+
+which(bonfprob_v == 1) #which ones are smaller?
+
+outcome_outliers_jack = jack[which(bonfprob_v == 1)] #all the jacknife res that are smalled than the bonferroni corrected alpha are saved here
+
+```
+
+##### Cook's Distance
+##### fig6A 
+```{r}
+p5 <- ggplot(diag, aes(x=seq(1:length(.cooksd)),y=.cooksd, na.rm = TRUE))+geom_point()
+p5 <- p5 + xlab("Index")+ylab("Cooks distance") + theme(legend.position="none")
+p5 <- p5 + geom_text(aes(label=ifelse(abs(.cooksd)>0.021,.index,"")))
+p5
+
+outcome_cook <- which(diag$.cooksd >0.021)
+
+#intersection between cook and outcome_outliers_jack
+outcome_intersection <- intersect(outcome_outliers_jack, outcome_cook)
+print(outcome_intersection)
+
+ggsave("FIG6A.png", p5, dpi = 300, width = 8, height = 6, units = "in")
+```
+
+```{r}
+outcome_outlier1 <- train[outcome_outliers_jack, ] %>% 
+  pull(ROWID)
+
+outcome_outlier2 <- train[outcome_cook, ] %>% 
+  pull(ROWID)
+
+complete_data_out <- housesales_c %>% 
+  filter(!ROWID %in% c(outcome_outlier1, outcome_outlier2))
+```
+
+# EDA complete_data_out 
+
+## 1. Tegund "Einbýli", "Fjölbýli", "Sérbýli"
+
+### poa vs. tegund boxplot
+```{r}
+ggplot(data = complete_data_out, aes(x = tegund, y = outcome)) + 
+  geom_boxplot() + 
+  facet_wrap(~tegund, scales = "free_x") + 
+  xlab("Tegund") + 
+  ylab("POA") + 
+  ggtitle("POA vs Tegund")
+```
+
+### fm_verd and poa
+```{r}
+ggplot(complete_data_out, aes(x = fm_verd, y = outcome, color = tegund)) +
+  geom_point() +
+  xlab("fm verd") +
+  ylab("POA") +
+  ggtitle("Relationship between fm verd and POA") +
+  scale_color_discrete(name = "Tegund")
+```
+
+### einflm vs. poa by tegund
+```{r}
+ggplot(complete_data_out, aes(x = einflm, y = outcome, color = tegund)) +
+  geom_point() +
+  xlab("meters squared") +
+  ylab("POA") +
+  ggtitle("Relationship between property size and POA") +
+  scale_color_discrete(name = "Tegund")
+```
+
+### einflm vs. poa by municipality
+```{r}
+ggplot(complete_data_out, aes(x = einflm, y = outcome, color = sveitarfelag)) +
+  geom_point() +
+  xlab("meters squared") +
+  ylab("POA") +
+  ggtitle("Relationship between property size and POA") +
+  scale_color_discrete(name = "Sveitarfelag")
+```
+
+### age vs. POA by tegund
+```{r}
+ggplot(complete_data_out, aes(x = age, y = outcome, color = tegund)) +
+  geom_point() +
+  xlab("age") +
+  ylab("POA") +
+  ggtitle("Relationship between property size and POA") +
+  scale_color_discrete(name = "Tegund")
+```
+
+
+### einflm vs. poa by municipality
+
+```{r}
+complete_data_out %>% 
+  ggplot(aes(x = einflm, y = outcome)) +
+  geom_line(color = "red") +
+  #geom_line(aes(x = einflm, y = outcome), data = housesales_c, color = "blue") +
+  labs(x = NULL, y = NULL) +
+  facet_wrap(~sveitarfelag, scales = "free_y") +
+  theme_test()
+```
+
+
+### age vs poa by municipality
+```{r}
+complete_data_out %>% 
+  ggplot(aes(x = age, y = outcome)) +
+  geom_line(color = "red") +
+  #geom_line(aes(x = age, y = outcome), data = housesales_c, color = "blue") +
+  labs(x = NULL, y = NULL) +
+  facet_wrap(~sveitarfelag, scales = "free_y") +
+  theme_test()
+```
+
+### DATE VS. FM_VERD VS. SVEITARFELAG
+```{r}
+
+complete_data_out %>% 
+  ggplot(aes(x = Date, y = fm_verd, color = sveitarfelag)) +
+  geom_line() +
+  facet_wrap(~sveitarfelag) +
+  theme_test() +
+  theme(legend.position = "none")
+
+```
+
+
+### DATE VS. outcome VS. SVEITARFELAG
+```{r}
+
+complete_data_out %>% 
+  ggplot(aes(x = Date, y = outcome, color = sveitarfelag)) +
+  geom_line() +
+  facet_wrap(~sveitarfelag) +
+  theme_test() +
+  theme(legend.position = "none")
+
+```
+
+
+# Outlier Analysis (outlier distribution)
+```{r}
+# combine these newly identified outliers into the same dataset as before 
+outliers_dataset <- housesales_c %>% 
+  filter(ROWID %in% c(outcome_outlier1, outcome_outlier2))
+
+library(ggplot2)
+
+ggplot(outliers_dataset, aes(x = ROWID, y = outcome)) +
+  geom_point() +
+  labs(title = "Outliers Visualization",
+       x = "ROWID",
+       y = "outcome")
+
+```
+
+# Model Fiting 3
+## Outcome 
+### train & test split
+
+```{r}
+complete_data_out$nuvirdi = complete_data_out$outcome
+complete_data_out$index2 <- c(1:length(complete_data_out$nuvirdi))
+
+set.seed(123) #sets the seed for random number generation
+train <- sample_frac(complete_data_out, 3/4) # split data into train and test
+test <- complete_data_out[-train$index2,]
+train_index <- c(1:length(train$nuvirdi)) #assign indices to each data point
+train$index <- train_index 
+test_index <- c(1:length(test$nuvirdi)) #assign indices to each data point
+test$index <- test_index 
+```
+
+### lm 1 outcome
+```{r}
+fit <- lm(nuvirdi ~ tegund + sveitarfelag + einflm + age, train) #model
+summary(fit)
+vif(fit)
+```
+```{r}
+fitted_values <- fitted(fit)
+mean_response <- mean(fit$residuals)
+RSS2 <- sum((fitted_values - mean_response)^2)
+RSS2
+
+residuals <- fit$residuals
+ESS2 <- sum(residuals^2)
+ESS2
+
+TSS2 <- ESS2 + RSS2
+TSS2
+
+anova(fit)
+```
+#### fit scaled
+
+```{r}
+fit_scaled <- lm(nuvirdi ~ tegund + sveitarfelag + scale(einflm) + scale(age), train) 
+summary(fit_scaled)
+```
+
+```{r}
+diag <- fortify(fit)
+diag$.index = c(1:length(diag$.resid)) 
+#  new column .index in the diag data frame and assigns it values ranging from 1 to the number of elements in the residuals of the model (.resid)
+
+diag$.jack<-rstudent(fit) 
+#a new column .jack in the diag data frame and assigns it the jackknife residuals of the model, obtained using the rstudent() function 
+```
+ 
+
+```{r}
+fit <- lm(nuvirdi ~ tegund + sveitarfelag + einflm + age, train) #model
+diag_realscale <- fortify(fit) # makes lm info easier to use because it converts the lm object to a dataframe
+
+fit1 <- lm(nuvirdi ~ .fitted, data = diag_realscale)
+summary(fit1)
+intercept <- coef(fit1)[1]
+slope <- coef(fit1)[2]
+
+best_fit_line <- intercept + slope * diag_realscale$`.fitted`
+#slope times the predicted values of the dataset aka (.fitted)
+
+preal <- ggplot(diag_realscale, aes(x = .fitted, y = nuvirdi)) + geom_point()
+preal <- preal + xlab("Predicted Values") + ylab("Fasteignamat") + labs(title = "Scatterplot of Fasteignamat vs. Predicted Values")
+preal <- preal + geom_line(aes(x = diag_realscale$`.fitted`, y = best_fit_line), color = "red")
+preal 
+```
+
+#### Multicollinearity between the numerical variables in the model fit
+
+```{r}
+train_subset <- train[,c("nuvirdi", "einflm", "age")]
+train_subset <- train_subset[complete.cases(train_subset),]
+cor(train_subset) > 0.9
+```
+
+
+
+#### Standard Residuals
+```{r}
+res_sd <- summary(fit)$sigma #residual std of the lm fit
+fit$sigma
+```
+sigma represents the difference between the observed response values and the values predicted by the model
+
+```{r}
+res_index <- ggplot(diag, aes(x = seq(1:length(.resid)), y = .resid)) + geom_point()
+res_index <- res_index + geom_hline(yintercept = 0, col = "red", linetype = "dashed")
+res_index <- res_index + geom_hline(yintercept = 2 * res_sd, col = "blue", linetype = "dashed")
+res_index <- res_index + geom_hline(yintercept = -2 * res_sd, col = "blue",
+linetype = "dashed")
+res_index <- res_index + geom_hline(yintercept = 3 * res_sd, col = "green",
+linetype = "dashed")
+res_index <- res_index + geom_hline(yintercept = -3 * res_sd, col = "green",
+linetype = "dashed")
+res_index <- res_index + xlab("Index") + ylab("Standard Residuals") + labs(title = "Index plot of standardized residuals")
+res_index <- res_index + geom_text(aes(label = ifelse(abs(.resid) > 2 * res_sd,
+.index, "")), hjust = -0.5, vjust = 0.4)
+res_index
+outcome_std_res <- which(abs(diag$.resid)>3 * res_sd)
+sum(abs(diag$.resid)>3 * res_sd)
+standardizedres3 <- length(diag$.resid)
+```
+
+#### Leverage
+
+```{r}
+p<-length(coef(fit)) # number of parameters
+n<-length(fitted(fit)) # number of observations
+lev_index<-ggplot(diag, aes(x=seq(1:length(.hat)),y=.hat))+geom_point()
+#.hat values are the leverages 
+
+lev_index<-lev_index+geom_hline(yintercept=2*p/n, col="red", linetype="dashed")
+lev_index<-lev_index+xlab("Index")+ylab("Leverages")
+lev_index<-lev_index+geom_text(aes(label=ifelse(.hat>2*p/n,.index,"")),hjust=0, vjust=0)
+lev_index
+outcome_leverage <- which(diag$.hat>2*p/n) #maybe try 3?
+sum(diag$.hat>2*p/n)
+```
+
+
+##### Studentized
+```{r}
+Stres_sd <- sd(diag$.stdresid, na.rm = TRUE)
+p3 <- ggplot(diag,aes(x=seq(1:length(.stdresid)),y=.stdresid))+geom_point()
+p3 <- p3 + geom_hline(yintercept=0, col="red", linetype="dashed")
+p3 <- p3 + geom_hline(yintercept=2*Stres_sd, col="blue", linetype="dashed")
+p3 <- p3 + geom_hline(yintercept=-2*Stres_sd, col="blue", linetype="dashed")
+p3 <- p3 + geom_hline(yintercept=3*Stres_sd, col="green", linetype="dashed")
+p3 <- p3 + geom_hline(yintercept=-3*Stres_sd, col="green", linetype="dashed")
+p3 <- p3 + xlab("Index")+ylab("Studentized residuals")+labs(title = "Index plot of Studentized residuals.")
+p3 <- p3 + geom_text(aes(label=ifelse(abs(.stdresid)>2*Stres_sd,.index,"")),hjust=-0.5, vjust=0.4)
+p3
+outcome_student_res <- which(abs(diag$.stdresid)>3*Stres_sd)
+sum(abs(diag$.stdresid)>3*Stres_sd)
+```
+
+##### Jacknife Residuals
+```{r}
+# Add jackknife residuals to diag dataframe
+diag$.jack <- rstudent(fit)
+jackres <- diag$.jack[!is.na(diag$.jack)]
+jackindex <- diag$.index[!is.na(diag$.jack)]
+
+
+# Jackknife index plot
+p4 <-
+  ggplot(diag, aes(
+    x = seq(1:length(.jack)),
+    y = .jack,
+    na.rm = TRUE
+  )) + geom_point()
+p4 <- p4 + geom_hline(yintercept = 0,
+                      col = "red",
+                      linetype = "dashed")
+p4 <- p4 + xlab("Index") + ylab("Jackknife residuals")
+p4 <-
+  p4 + geom_text(aes(label = ifelse(abs(.jack) > 3, .index, "")), hjust =
+                   -0.1)
+p4
+outcome_jack_res <- which(diag$.jack > 3)
+sum(diag$.jack > 3)
+```
+
+##### Bonferroni Correction & Hypothesis testing
+
+```{r}
+jack <- which(diag$.jack > 3) # indices of the jack residuals that are greater than 3 
+df <- length(jackres) - length(summary(fit)$coefficients[,1]) - 1
+
+j = 1
+x = c() # empty vector to store all of the pvalues that represent the probability of observing a value equal to or more extreme than the absolute value of each jackknife residual
+
+for (i in jack) {
+  x[j] <- 2 * (1 - pt(abs(diag$.jack[i]), df))
+  # two-tailed p-value for the observation's absolute value of "diag$.jack[i]" is calculated using the "pt()" function and scaled by 2
+  
+  j = j + 1
+}
+
+alpha <- 0.05 #normal alpha level
+bonf <- alpha / length(diag$.jack) #bonferroni corrected alpha level
+bonfprob <- c(x, bonf)
+
+bonfprob_v <- bonfprob < bonf # which pval are smaller than the bonferroni corrected alpha 
+
+#cbind(jack, bonfprob_v) # 1 is smaller, 0 is not smaller 
+
+which(bonfprob_v == 1) #which ones are smaller?
+
+outcome_outliers_jack = jack[which(bonfprob_v == 1)] #all the jacknife res that are smalled than the bonferroni corrected alpha are saved here
+
+```
+
+##### Cook's Distance
+
+```{r}
+p5 <- ggplot(diag, aes(x=seq(1:length(.cooksd)),y=.cooksd, na.rm = TRUE))+geom_point()
+p5 <- p5 + xlab("Index")+ylab("Cooks distance") + theme(legend.position="none")
+p5 <- p5 + geom_text(aes(label=ifelse(abs(.cooksd)>0.021,.index,"")))
+p5
+
+outcome_cook <- which(diag$.cooksd >0.021)
+
+#intersection between cook and outcome_outliers_jack
+outcome_intersection <- intersect(outcome_outliers_jack, outcome_cook)
+print(outcome_intersection)
+
+```
+
+```{r}
+outcome_outlier1 <- train[outcome_outliers_jack, ] %>% 
+  pull(ROWID)
+
+outcome_outlier2 <- train[outcome_cook, ] %>% 
+  pull(ROWID)
+
+complete_data_out2 <- complete_data_out %>% 
+  filter(!ROWID %in% c(outcome_outlier1, outcome_outlier2))
+```
+
+
+
+# EDA complete_data_out2 
+
+## 1. Tegund "Einbýli", "Fjölbýli", "Sérbýli"
+
+### poa vs. tegund boxplot
+```{r}
+ggplot(data = complete_data_out2, aes(x = tegund, y = outcome)) + 
+  geom_boxplot() + 
+  facet_wrap(~tegund, scales = "free_x") + 
+  xlab("Tegund") + 
+  ylab("POA") + 
+  ggtitle("POA vs Tegund")
+```
+
+### fm_verd and poa
+```{r}
+ggplot(complete_data_out2, aes(x = fm_verd, y = outcome, color = tegund)) +
+  geom_point() +
+  xlab("fm verd") +
+  ylab("POA") +
+  ggtitle("Relationship between fm verd and POA") +
+  scale_color_discrete(name = "Tegund")
+```
+
+### einflm vs. poa by tegund
+```{r}
+ggplot(complete_data_out2, aes(x = einflm, y = outcome, color = tegund)) +
+  geom_point() +
+  xlab("meters squared") +
+  ylab("POA") +
+  ggtitle("Relationship between property size and POA") +
+  scale_color_discrete(name = "Tegund")
+```
+
+### einflm vs. poa by municipality
+```{r}
+ggplot(complete_data_out2, aes(x = einflm, y = outcome, color = sveitarfelag)) +
+  geom_point() +
+  xlab("meters squared") +
+  ylab("POA") +
+  ggtitle("Relationship between property size and POA") +
+  scale_color_discrete(name = "Sveitarfelag")
+```
+
+### age vs. POA by tegund
+```{r}
+ggplot(complete_data_out2, aes(x = age, y = outcome, color = tegund)) +
+  geom_point() +
+  xlab("age") +
+  ylab("POA") +
+  ggtitle("Relationship between property size and POA") +
+  scale_color_discrete(name = "Tegund")
+```
+
+
+### einflm vs. poa by municipality
+
+```{r}
+complete_data_out2 %>% 
+  ggplot(aes(x = einflm, y = outcome)) +
+  geom_line(color = "red") +
+  #geom_line(aes(x = einflm, y = outcome), data = housesales_c, color = "blue") +
+  labs(x = NULL, y = NULL) +
+  facet_wrap(~sveitarfelag, scales = "free_y") +
+  theme_test()
+```
+
+
+### age vs poa by municipality
+```{r}
+complete_data_out2 %>% 
+  ggplot(aes(x = age, y = outcome)) +
+  geom_line(color = "red") +
+  #geom_line(aes(x = age, y = outcome), data = housesales_c, color = "blue") +
+  labs(x = NULL, y = NULL) +
+  facet_wrap(~sveitarfelag, scales = "free_y") +
+  theme_test()
+```
+
+### DATE VS. FM_VERD VS. SVEITARFELAG
+```{r}
+
+complete_data_out2 %>% 
+  ggplot(aes(x = Date, y = fm_verd, color = sveitarfelag)) +
+  geom_line() +
+  facet_wrap(~sveitarfelag) +
+  theme_test() +
+  theme(legend.position = "none")
+
+```
+
+
+### DATE VS. outcome VS. SVEITARFELAG
+```{r}
+
+complete_data_out2 %>% 
+  ggplot(aes(x = Date, y = outcome, color = sveitarfelag)) +
+  geom_line() +
+  facet_wrap(~sveitarfelag) +
+  theme_test() +
+  theme(legend.position = "none")
+
+```
+
+
+
+# 2. Outlier Analysis (outlier distribution)
+```{r}
+# combine these newly identified outliers into the same dataset as before 
+additional_rows2 <- housesales_c %>% 
+  filter(ROWID %in% c(outcome_outlier1, outcome_outlier2))
+
+outliers_dataset <- rbind(outliers_dataset, additional_rows2)
+summary(outliers_dataset)
+
+library(ggplot2)
+
+ggplot(outliers_dataset, aes(x = ROWID, y = outcome)) +
+  geom_point() +
+  labs(title = "Outliers Visualization",
+       x = "ROWID",
+       y = "outcome")
+
+```
+
+# Model Fiting 4
+
+## Outcome 
+### train & test split
+
+```{r}
+complete_data_out2$nuvirdi = complete_data_out2$outcome
+complete_data_out2$index2 <- c(1:length(complete_data_out2$nuvirdi))
+
+set.seed(123) #sets the seed for random number generation
+train <- sample_frac(complete_data_out2, 3/4) # split data into train and test
+test <- complete_data_out2[-train$index2,]
+train_index <- c(1:length(train$nuvirdi)) #assign indices to each data point
+train$index <- train_index 
+test_index <- c(1:length(test$nuvirdi)) #assign indices to each data point
+test$index <- test_index 
+```
+
+### lm 1 outcome
+```{r}
+fit <- lm(nuvirdi ~ tegund + sveitarfelag + einflm + age, train) #model
+summary(fit)
+vif(fit)
+```
+### RSS ESS TOTAL
+```{r}
+
+fitted_values <- fitted(fit)
+mean_response <- mean(fit$residuals)
+RSS3 <- sum((fitted_values - mean_response)^2)
+RSS3
+
+residuals <- fit$residuals
+ESS3 <- sum(residuals^2)
+ESS3
+
+TSS3 <- ESS3 + RSS3
+TSS3
+
+anova(fit)
+```
+#### fit scaled
+
+```{r}
+fit_scaled <- lm(nuvirdi ~ tegund + sveitarfelag + scale(einflm) + scale(age), train) 
+summary(fit_scaled)
+```
+
+```{r}
+diag <- fortify(fit)
+diag$.index = c(1:length(diag$.resid)) 
+#  new column .index in the diag data frame and assigns it values ranging from 1 to the number of elements in the residuals of the model (.resid)
+
+diag$.jack<-rstudent(fit) 
+#a new column .jack in the diag data frame and assigns it the jackknife residuals of the model, obtained using the rstudent() function 
+```
+ 
+
+```{r}
+fit <- lm(nuvirdi ~ tegund + sveitarfelag + einflm + age, train) #model
+diag_realscale <- fortify(fit) # makes lm info easier to use because it converts the lm object to a dataframe
+
+fit1 <- lm(nuvirdi ~ .fitted, data = diag_realscale)
+summary(fit1)
+intercept <- coef(fit1)[1]
+slope <- coef(fit1)[2]
+
+best_fit_line <- intercept + slope * diag_realscale$`.fitted`
+#slope times the predicted values of the dataset aka (.fitted)
+
+preal <- ggplot(diag_realscale, aes(x = .fitted, y = nuvirdi)) + geom_point()
+preal <- preal + xlab("Predicted Values") + ylab("Fasteignamat") + labs(title = "Scatterplot of Fasteignamat vs. Predicted Values")
+preal <- preal + geom_line(aes(x = diag_realscale$`.fitted`, y = best_fit_line), color = "red")
+preal 
+```
+
+#### Multicollinearity between the numerical variables in the model fit
+
+```{r}
+train_subset <- train[,c("nuvirdi", "einflm", "age")]
+train_subset <- train_subset[complete.cases(train_subset),]
+cor(train_subset) > 0.9
+```
+
+
+
+#### Standard Residuals
+```{r}
+res_sd <- summary(fit)$sigma #residual std of the lm fit
+fit$sigma
+```
+sigma represents the difference between the observed response values and the values predicted by the model
+
+```{r}
+res_index <- ggplot(diag, aes(x = seq(1:length(.resid)), y = .resid)) + geom_point()
+res_index <- res_index + geom_hline(yintercept = 0, col = "red", linetype = "dashed")
+res_index <- res_index + geom_hline(yintercept = 2 * res_sd, col = "blue", linetype = "dashed")
+res_index <- res_index + geom_hline(yintercept = -2 * res_sd, col = "blue",
+linetype = "dashed")
+res_index <- res_index + geom_hline(yintercept = 3 * res_sd, col = "green",
+linetype = "dashed")
+res_index <- res_index + geom_hline(yintercept = -3 * res_sd, col = "green",
+linetype = "dashed")
+res_index <- res_index + xlab("Index") + ylab("Standard Residuals") + labs(title = "Index plot of standardized residuals")
+res_index <- res_index + geom_text(aes(label = ifelse(abs(.resid) > 2 * res_sd,
+.index, "")), hjust = -0.5, vjust = 0.4)
+res_index
+outcome_std_res <- which(abs(diag$.resid)>3 * res_sd)
+sum(abs(diag$.resid)>3 * res_sd)
+standardizedres4 <- length(diag$.resid)
+```
+
+#### Leverage
+
+```{r}
+p<-length(coef(fit)) # number of parameters
+n<-length(fitted(fit)) # number of observations
+lev_index<-ggplot(diag, aes(x=seq(1:length(.hat)),y=.hat))+geom_point()
+#.hat values are the leverages 
+
+lev_index<-lev_index+geom_hline(yintercept=2*p/n, col="red", linetype="dashed")
+lev_index<-lev_index+xlab("Index")+ylab("Leverages")
+lev_index<-lev_index+geom_text(aes(label=ifelse(.hat>2*p/n,.index,"")),hjust=0, vjust=0)
+lev_index
+outcome_leverage <- which(diag$.hat>2*p/n) #maybe try 3?
+sum(diag$.hat>2*p/n)
+```
+
+
+##### Studentized
+```{r}
+Stres_sd <- sd(diag$.stdresid, na.rm = TRUE)
+p3 <- ggplot(diag,aes(x=seq(1:length(.stdresid)),y=.stdresid))+geom_point()
+p3 <- p3 + geom_hline(yintercept=0, col="red", linetype="dashed")
+p3 <- p3 + geom_hline(yintercept=2*Stres_sd, col="blue", linetype="dashed")
+p3 <- p3 + geom_hline(yintercept=-2*Stres_sd, col="blue", linetype="dashed")
+p3 <- p3 + geom_hline(yintercept=3*Stres_sd, col="green", linetype="dashed")
+p3 <- p3 + geom_hline(yintercept=-3*Stres_sd, col="green", linetype="dashed")
+p3 <- p3 + xlab("Index")+ylab("Studentized residuals")+labs(title = "Index plot of Studentized residuals.")
+p3 <- p3 + geom_text(aes(label=ifelse(abs(.stdresid)>2*Stres_sd,.index,"")),hjust=-0.5, vjust=0.4)
+p3
+outcome_student_res <- which(abs(diag$.stdresid)>3*Stres_sd)
+sum(abs(diag$.stdresid)>3*Stres_sd)
+```
+
+##### Jacknife Residuals
+```{r}
+# Add jackknife residuals to diag dataframe
+diag$.jack <- rstudent(fit)
+jackres <- diag$.jack[!is.na(diag$.jack)]
+jackindex <- diag$.index[!is.na(diag$.jack)]
+
+
+# Jackknife index plot
+p4 <-
+  ggplot(diag, aes(
+    x = seq(1:length(.jack)),
+    y = .jack,
+    na.rm = TRUE
+  )) + geom_point()
+p4 <- p4 + geom_hline(yintercept = 0,
+                      col = "red",
+                      linetype = "dashed")
+p4 <- p4 + xlab("Index") + ylab("Jackknife residuals")
+p4 <-
+  p4 + geom_text(aes(label = ifelse(abs(.jack) > 3, .index, "")), hjust =
+                   -0.1)
+p4
+outcome_jack_res <- which(diag$.jack > 3)
+sum(diag$.jack > 3)
+```
+
+##### Bonferroni Correction & Hypothesis testing
+
+```{r}
+jack <- which(diag$.jack > 3) # indices of the jack residuals that are greater than 3 
+df <- length(jackres) - length(summary(fit)$coefficients[,1]) - 1
+
+j = 1
+x = c() # empty vector to store all of the pvalues that represent the probability of observing a value equal to or more extreme than the absolute value of each jackknife residual
+
+for (i in jack) {
+  x[j] <- 2 * (1 - pt(abs(diag$.jack[i]), df))
+  # two-tailed p-value for the observation's absolute value of "diag$.jack[i]" is calculated using the "pt()" function and scaled by 2
+  
+  j = j + 1
+}
+
+alpha <- 0.05 #normal alpha level
+bonf <- alpha / length(diag$.jack) #bonferroni corrected alpha level
+bonfprob <- c(x, bonf)
+
+bonfprob_v <- bonfprob < bonf # which pval are smaller than the bonferroni corrected alpha 
+
+#cbind(jack, bonfprob_v) # 1 is smaller, 0 is not smaller 
+
+which(bonfprob_v == 1) #which ones are smaller?
+
+outcome_outliers_jack = jack[which(bonfprob_v == 1)] #all the jacknife res that are smalled than the bonferroni corrected alpha are saved here
+
+```
+
+##### Cook's Distance
+
+```{r}
+p5 <- ggplot(diag, aes(x=seq(1:length(.cooksd)),y=.cooksd, na.rm = TRUE))+geom_point()
+p5 <- p5 + xlab("Index")+ylab("Cooks distance") + theme(legend.position="none")
+p5 <- p5 + geom_text(aes(label=ifelse(abs(.cooksd)>0.021,.index,"")))
+p5
+
+outcome_cook <- which(diag$.cooksd >0.021)
+
+#intersection between cook and outcome_outliers_jack
+outcome_intersection <- intersect(outcome_outliers_jack, outcome_cook)
+print(outcome_intersection)
+
+```
+
+```{r}
+outcome_outlier1 <- train[outcome_outliers_jack, ] %>% 
+  pull(ROWID)
+
+outcome_outlier2 <- train[outcome_cook, ] %>% 
+  pull(ROWID)
+
+complete_data_out3 <- complete_data_out2 %>% 
+  filter(!ROWID %in% c(outcome_outlier1, outcome_outlier2))
+```
+
+
+# EDA complete_data_out3 
+
+## 1. Tegund "Einbýli", "Fjölbýli", "Sérbýli"
+
+### poa vs. tegund boxplot
+```{r}
+ggplot(data = complete_data_out3, aes(x = tegund, y = outcome)) + 
+  geom_boxplot() + 
+  facet_wrap(~tegund, scales = "free_x") + 
+  xlab("Tegund") + 
+  ylab("POA") + 
+  ggtitle("POA vs Tegund")
+```
+
+### fm_verd and poa
+```{r}
+ggplot(complete_data_out3, aes(x = fm_verd, y = outcome, color = tegund)) +
+  geom_point() +
+  xlab("fm verd") +
+  ylab("POA") +
+  ggtitle("Relationship between fm verd and POA") +
+  scale_color_discrete(name = "Tegund")
+```
+
+### einflm vs. poa by tegund
+```{r}
+ggplot(complete_data_out3, aes(x = einflm, y = outcome, color = tegund)) +
+  geom_point() +
+  xlab("meters squared") +
+  ylab("POA") +
+  ggtitle("Relationship between property size and POA") +
+  scale_color_discrete(name = "Tegund")
+```
+
+### einflm vs. poa by municipality
+```{r}
+ggplot(complete_data_out3, aes(x = einflm, y = outcome, color = sveitarfelag)) +
+  geom_point() +
+  xlab("meters squared") +
+  ylab("POA") +
+  ggtitle("Relationship between property size and POA") +
+  scale_color_discrete(name = "Sveitarfelag")
+```
+
+### age vs. POA by tegund
+```{r}
+ggplot(complete_data_out3, aes(x = age, y = outcome, color = tegund)) +
+  geom_point() +
+  xlab("age") +
+  ylab("POA") +
+  ggtitle("Relationship between property size and POA") +
+  scale_color_discrete(name = "Tegund")
+```
+
+
+### einflm vs. poa by municipality
+
+```{r}
+complete_data_out3 %>% 
+  ggplot(aes(x = einflm, y = outcome)) +
+  geom_line(color = "red") +
+  #geom_line(aes(x = einflm, y = outcome), data = housesales_c, color = "blue") +
+  labs(x = NULL, y = NULL) +
+  facet_wrap(~sveitarfelag, scales = "free_y") +
+  theme_test()
+```
+
+
+### age vs poa by municipality
+```{r}
+complete_data_out3 %>% 
+  ggplot(aes(x = age, y = outcome)) +
+  geom_line(color = "red") +
+  #geom_line(aes(x = age, y = outcome), data = housesales_c, color = "blue") +
+  labs(x = NULL, y = NULL) +
+  facet_wrap(~sveitarfelag, scales = "free_y") +
+  theme_test()
+```
+
+### DATE VS. FM_VERD VS. SVEITARFELAG
+```{r}
+
+complete_data_out3 %>% 
+  ggplot(aes(x = Date, y = fm_verd, color = sveitarfelag)) +
+  geom_line() +
+  facet_wrap(~sveitarfelag) +
+  theme_test() +
+  theme(legend.position = "none")
+
+```
+
+
+### DATE VS. outcome VS. SVEITARFELAG
+```{r}
+
+complete_data_out3 %>% 
+  ggplot(aes(x = Date, y = outcome, color = sveitarfelag)) +
+  geom_line() +
+  facet_wrap(~sveitarfelag) +
+  theme_test() +
+  theme(legend.position = "none")
+
+```
+
+
+# 3. Outlier Analysis (outlier distribution)
+```{r}
+# combine these newly identified outliers into the same dataset as before 
+additional_rows3 <- housesales_c %>% 
+  filter(ROWID %in% c(outcome_outlier1, outcome_outlier2))
+
+outliers_dataset <- rbind(outliers_dataset, additional_rows3)
+summary(outliers_dataset)
+
+library(ggplot2)
+
+ggplot(outliers_dataset, aes(x = ROWID, y = outcome)) +
+  geom_point() +
+  labs(title = "Outliers Visualization",
+       x = "ROWID",
+       y = "outcome")
+
+```
+
+# Model Fiting 5
+
+## Outcome
+### train & test split
+
+```{r}
+complete_data_out3$nuvirdi = complete_data_out3$outcome
+complete_data_out3$index2 <- c(1:length(complete_data_out3$nuvirdi))
+
+set.seed(123) #sets the seed for random number generation
+train <- sample_frac(complete_data_out3, 3/4) # split data into train and test
+test <- complete_data_out3[-train$index2,]
+train_index <- c(1:length(train$nuvirdi)) #assign indices to each data point
+train$index <- train_index 
+test_index <- c(1:length(test$nuvirdi)) #assign indices to each data point
+test$index <- test_index 
+```
+
+### lm 1 outcome
+```{r}
+fit <- lm(nuvirdi ~ tegund + sveitarfelag + einflm + age, train) #model
+summary(fit)
+vif(fit)
+```
+### RSS ESS TOTAL
+```{r}
+fitted_values <- fitted(fit)
+mean_response <- mean(fit$residuals)
+RSS4 <- sum((fitted_values - mean_response)^2)
+RSS4
+
+residuals <- fit$residuals
+ESS4 <- sum(residuals^2)
+ESS4
+
+TSS4 <- ESS4 + RSS4
+TSS4
+
+anova(fit)
+```
+#### fit scaled
+
+```{r}
+fit_scaled <- lm(nuvirdi ~ tegund + sveitarfelag + scale(einflm) + scale(age), train) 
+summary(fit_scaled)
+```
+
+```{r}
+diag <- fortify(fit)
+diag$.index = c(1:length(diag$.resid)) 
+#  new column .index in the diag data frame and assigns it values ranging from 1 to the number of elements in the residuals of the model (.resid)
+
+diag$.jack<-rstudent(fit) 
+#a new column .jack in the diag data frame and assigns it the jackknife residuals of the model, obtained using the rstudent() function 
+```
+ 
+##### fig1B
+```{r}
+fit <- lm(nuvirdi ~ tegund + sveitarfelag + einflm + age, train) #model
+diag_realscale <- fortify(fit) # makes lm info easier to use because it converts the lm object to a dataframe
+
+fit1 <- lm(nuvirdi ~ .fitted, data = diag_realscale)
+summary(fit1)
+intercept <- coef(fit1)[1]
+slope <- coef(fit1)[2]
+
+best_fit_line <- intercept + slope * diag_realscale$`.fitted`
+#slope times the predicted values of the dataset aka (.fitted)
+
+preal <- ggplot(diag_realscale, aes(x = .fitted, y = nuvirdi)) + geom_point()
+preal <- preal + xlab("Predicted Values") + ylab("Outcome") + labs(title = "Scatterplot of Outcome vs. Predicted Values")
+preal <- preal + geom_line(aes(x = diag_realscale$`.fitted`, y = best_fit_line), color = "red")
+preal 
+
+ggsave("FIG1B.png", preal, dpi = 300, width = 8, height = 6, units = "in")
+```
+
+
+#### Multicollinearity between the numerical variables in the model fit
+
+```{r}
+train_subset <- train[,c("nuvirdi", "einflm", "age")]
+train_subset <- train_subset[complete.cases(train_subset),]
+cor(train_subset) > 0.9
+```
+
+
+
+#### Standard Residuals
+```{r}
+res_sd <- summary(fit)$sigma #residual std of the lm fit
+fit$sigma
+```
+sigma represents the difference between the observed response values and the values predicted by the model
+
+##### fig2B
+```{r}
+res_index <- ggplot(diag, aes(x = seq(1:length(.resid)), y = .resid)) + geom_point()
+res_index <- res_index + geom_hline(yintercept = 0, col = "red", linetype = "dashed")
+res_index <- res_index + geom_hline(yintercept = 2 * res_sd, col = "blue", linetype = "dashed")
+res_index <- res_index + geom_hline(yintercept = -2 * res_sd, col = "blue",
+linetype = "dashed")
+res_index <- res_index + geom_hline(yintercept = 3 * res_sd, col = "green",
+linetype = "dashed")
+res_index <- res_index + geom_hline(yintercept = -3 * res_sd, col = "green",
+linetype = "dashed")
+res_index <- res_index + xlab("Index") + ylab("Standard Residuals") + labs(title = "Index plot of standardized residuals")
+res_index <- res_index + geom_text(aes(label = ifelse(abs(.resid) > 2 * res_sd,
+.index, "")), hjust = -0.5, vjust = 0.4)
+res_index
+outcome_std_res <- which(abs(diag$.resid)>3 * res_sd)
+sum(abs(diag$.resid)>3 * res_sd)
+standardizedres5 <- length(diag$.resid)
+ggsave("FIG2B.png", res_index, dpi = 300, width = 8, height = 6, units = "in")
+```
+
+#### Leverage
+
+##### fig3b
+```{r}
+p<-length(coef(fit)) # number of parameters
+n<-length(fitted(fit)) # number of observations
+lev_index<-ggplot(diag, aes(x=seq(1:length(.hat)),y=.hat))+geom_point()
+#.hat values are the leverages 
+
+lev_index<-lev_index+geom_hline(yintercept=2*p/n, col="red", linetype="dashed")
+lev_index<-lev_index+xlab("Index")+ylab("Leverages")
+lev_index<-lev_index+geom_text(aes(label=ifelse(.hat>2*p/n,.index,"")),hjust=0, vjust=0)
+lev_index
+outcome_leverage <- which(diag$.hat>2*p/n) #maybe try 3?
+sum(diag$.hat>2*p/n)
+
+ggsave("FIG3B.png", lev_index, dpi = 300, width = 8, height = 6, units = "in")
+```
+
+
+##### Studentized
+##### fig4B
+```{r}
+Stres_sd <- sd(diag$.stdresid, na.rm = TRUE)
+p3 <- ggplot(diag,aes(x=seq(1:length(.stdresid)),y=.stdresid))+geom_point()
+p3 <- p3 + geom_hline(yintercept=0, col="red", linetype="dashed")
+p3 <- p3 + geom_hline(yintercept=2*Stres_sd, col="blue", linetype="dashed")
+p3 <- p3 + geom_hline(yintercept=-2*Stres_sd, col="blue", linetype="dashed")
+p3 <- p3 + geom_hline(yintercept=3*Stres_sd, col="green", linetype="dashed")
+p3 <- p3 + geom_hline(yintercept=-3*Stres_sd, col="green", linetype="dashed")
+p3 <- p3 + xlab("Index")+ylab("Studentized residuals")+labs(title = "Index plot of Studentized residuals.")
+p3 <- p3 + geom_text(aes(label=ifelse(abs(.stdresid)>2*Stres_sd,.index,"")),hjust=-0.5, vjust=0.4)
+p3
+outcome_student_res <- which(abs(diag$.stdresid)>3*Stres_sd)
+sum(abs(diag$.stdresid)>3*Stres_sd)
+
+ggsave("FIG4B.png", p3, dpi = 300, width = 8, height = 6, units = "in")
+```
+
+##### Jacknife Residuals
+
+#### fig5B
+```{r}
+# Add jackknife residuals to diag dataframe
+diag$.jack <- rstudent(fit)
+jackres <- diag$.jack[!is.na(diag$.jack)]
+jackindex <- diag$.index[!is.na(diag$.jack)]
+
+
+# Jackknife index plot
+p4 <-
+  ggplot(diag, aes(
+    x = seq(1:length(.jack)),
+    y = .jack,
+    na.rm = TRUE
+  )) + geom_point()
+p4 <- p4 + geom_hline(yintercept = 0,
+                      col = "red",
+                      linetype = "dashed")
+p4 <- p4 + xlab("Index") + ylab("Jackknife residuals")
+p4 <-
+  p4 + geom_text(aes(label = ifelse(abs(.jack) > 3, .index, "")), hjust =
+                   -0.1)
+p4
+outcome_jack_res <- which(diag$.jack > 3)
+sum(diag$.jack > 3)
+
+ggsave("FIG5B.png", p4, dpi = 300, width = 8, height = 6, units = "in")
+```
+
+##### Bonferroni Correction & Hypothesis testing
+
+```{r}
+jack <- which(diag$.jack > 3) # indices of the jack residuals that are greater than 3 
+df <- length(jackres) - length(summary(fit)$coefficients[,1]) - 1
+
+j = 1
+x = c() # empty vector to store all of the pvalues that represent the probability of observing a value equal to or more extreme than the absolute value of each jackknife residual
+
+for (i in jack) {
+  x[j] <- 2 * (1 - pt(abs(diag$.jack[i]), df))
+  # two-tailed p-value for the observation's absolute value of "diag$.jack[i]" is calculated using the "pt()" function and scaled by 2
+  
+  j = j + 1
+}
+
+alpha <- 0.05 #normal alpha level
+bonf <- alpha / length(diag$.jack) #bonferroni corrected alpha level
+bonfprob <- c(x, bonf)
+
+bonfprob_v <- bonfprob < bonf # which pval are smaller than the bonferroni corrected alpha 
+
+#cbind(jack, bonfprob_v) # 1 is smaller, 0 is not smaller 
+
+which(bonfprob_v == 1) #which ones are smaller?
+
+outcome_outliers_jack = jack[which(bonfprob_v == 1)] #all the jacknife res that are smalled than the bonferroni corrected alpha are saved here
+
+```
+
+##### Cook's Distance
+##### fig 6B
+```{r}
+p5 <- ggplot(diag, aes(x=seq(1:length(.cooksd)),y=.cooksd, na.rm = TRUE))+geom_point()
+p5 <- p5 + xlab("Index")+ylab("Cooks distance") + theme(legend.position="none")
+p5 <- p5 + geom_text(aes(label=ifelse(abs(.cooksd)>0.021,.index,"")))
+p5
+
+outcome_cook <- which(diag$.cooksd >0.021)
+
+#intersection between cook and outcome_outliers_jack
+outcome_intersection <- intersect(outcome_outliers_jack, outcome_cook)
+print(outcome_intersection)
+
+ggsave("FIG6B.png", p5, dpi = 300, width = 8, height = 6, units = "in")
+```
+
+```{r}
+outcome_outlier1 <- train[outcome_outliers_jack, ] %>% 
+  pull(ROWID)
+
+outcome_outlier2 <- train[outcome_cook, ] %>% 
+  pull(ROWID)
+
+complete_data_out4 <- complete_data_out3 %>% 
+  filter(!ROWID %in% c(outcome_outlier1, outcome_outlier2))
+``` 
+
+# EDA complete_data_out4 
+
+## 1. Tegund "Einbýli", "Fjölbýli", "Sérbýli"
+
+### poa vs. tegund boxplot
+```{r}
+ggplot(data = complete_data_out4, aes(x = tegund, y = outcome)) + 
+  geom_boxplot() + 
+  facet_wrap(~tegund, scales = "free_x") + 
+  xlab("Tegund") + 
+  ylab("POA") + 
+  ggtitle("POA vs Tegund")
+```
+
+### fm_verd and poa
+```{r}
+ggplot(complete_data_out4, aes(x = fm_verd, y = outcome, color = tegund)) +
+  geom_point() +
+  xlab("fm verd") +
+  ylab("POA") +
+  ggtitle("Relationship between fm verd and POA") +
+  scale_color_discrete(name = "Tegund")
+```
+
+### einflm vs. poa by tegund
+```{r}
+ggplot(complete_data_out4, aes(x = einflm, y = outcome, color = tegund)) +
+  geom_point() +
+  xlab("meters squared") +
+  ylab("POA") +
+  ggtitle("Relationship between property size and POA") +
+  scale_color_discrete(name = "Tegund")
+```
+
+### einflm vs. poa by municipality
+```{r}
+ggplot(complete_data_out4, aes(x = einflm, y = outcome, color = sveitarfelag)) +
+  geom_point() +
+  xlab("meters squared") +
+  ylab("POA") +
+  ggtitle("Relationship between property size and POA") +
+  scale_color_discrete(name = "Sveitarfelag")
+```
+
+### age vs. POA by tegund
+```{r}
+ggplot(complete_data_out4, aes(x = age, y = outcome, color = tegund)) +
+  geom_point() +
+  xlab("age") +
+  ylab("POA") +
+  ggtitle("Relationship between property size and POA") +
+  scale_color_discrete(name = "Tegund")
+```
+
+
+### einflm vs. poa by municipality
+
+```{r}
+complete_data_out4 %>% 
+  ggplot(aes(x = einflm, y = outcome)) +
+  geom_line(color = "red") +
+  #geom_line(aes(x = einflm, y = outcome), data = housesales_c, color = "blue") +
+  labs(x = NULL, y = NULL) +
+  facet_wrap(~sveitarfelag, scales = "free_y") +
+  theme_test()
+```
+
+
+### age vs poa by municipality
+```{r}
+complete_data_out4 %>% 
+  ggplot(aes(x = age, y = outcome)) +
+  geom_line(color = "red") +
+  #geom_line(aes(x = age, y = outcome), data = housesales_c, color = "blue") +
+  labs(x = NULL, y = NULL) +
+  facet_wrap(~sveitarfelag, scales = "free_y") +
+  theme_test()
+```
+
+### DATE VS. FM_VERD VS. SVEITARFELAG
+```{r}
+
+complete_data_out4 %>% 
+  ggplot(aes(x = Date, y = fm_verd, color = sveitarfelag)) +
+  geom_line() +
+  facet_wrap(~sveitarfelag) +
+  theme_test() +
+  theme(legend.position = "none")
+
+```
+
+
+### DATE VS. outcome VS. SVEITARFELAG
+```{r}
+
+complete_data_out4 %>% 
+  ggplot(aes(x = Date, y = outcome, color = sveitarfelag)) +
+  geom_line() +
+  facet_wrap(~sveitarfelag) +
+  theme_test() +
+  theme(legend.position = "none")
+
+```
+# 4. Outlier Analysis (outlier distribution)
+```{r}
+# combine these newly identified outliers into the same dataset as before 
+additional_rows4 <- housesales_c %>% 
+  filter(ROWID %in% c(outcome_outlier1, outcome_outlier2))
+
+outliers_dataset <- rbind(outliers_dataset, additional_rows4)
+summary(outliers_dataset)
+
+library(ggplot2)
+
+ggplot(outliers_dataset, aes(x = ROWID, y = outcome)) +
+  geom_point() +
+  labs(title = "Outliers Visualization",
+       x = "ROWID",
+       y = "outcome")
+
+```
+
+
+# Model Fiting 6
+
+## Outcome
+### train & test split
+
+```{r}
+complete_data_out4$nuvirdi = complete_data_out4$outcome
+complete_data_out4$index2 <- c(1:length(complete_data_out4$nuvirdi))
+
+set.seed(123) #sets the seed for random number generation
+train <- sample_frac(complete_data_out4, 3/4) # split data into train and test
+test <- complete_data_out4[-train$index2,]
+train_index <- c(1:length(train$nuvirdi)) #assign indices to each data point
+train$index <- train_index 
+test_index <- c(1:length(test$nuvirdi)) #assign indices to each data point
+test$index <- test_index 
+```
+
+### lm 1 outcome
+```{r}
+fit <- lm(nuvirdi ~ tegund + sveitarfelag + einflm + age, train) #model
+summary(fit)
+vif(fit)
+```
+###RSS ESS Total
+```{r}
+fitted_values <- fitted(fit)
+mean_response <- mean(fit$residuals)
+RSS5 <- sum((fitted_values - mean_response)^2)
+RSS5
+
+residuals <- fit$residuals
+ESS5 <- sum(residuals^2)
+ESS5
+
+TSS5 <- ESS5 + RSS5
+TSS5
+
+anova(fit)
+```
+
+#### fit scaled
+
+```{r}
+fit_scaled <- lm(nuvirdi ~ tegund + sveitarfelag + scale(einflm) + scale(age), train) 
+summary(fit_scaled)
+```
+
+```{r}
+diag <- fortify(fit)
+diag$.index = c(1:length(diag$.resid)) 
+#  new column .index in the diag data frame and assigns it values ranging from 1 to the number of elements in the residuals of the model (.resid)
+
+diag$.jack<-rstudent(fit) 
+#a new column .jack in the diag data frame and assigns it the jackknife residuals of the model, obtained using the rstudent() function 
+```
+ 
+
+```{r}
+fit <- lm(nuvirdi ~ tegund + sveitarfelag + einflm + age, train) #model
+diag_realscale <- fortify(fit) # makes lm info easier to use because it converts the lm object to a dataframe
+
+fit1 <- lm(nuvirdi ~ .fitted, data = diag_realscale)
+summary(fit1)
+intercept <- coef(fit1)[1]
+slope <- coef(fit1)[2]
+
+best_fit_line <- intercept + slope * diag_realscale$`.fitted`
+#slope times the predicted values of the dataset aka (.fitted)
+
+preal <- ggplot(diag_realscale, aes(x = .fitted, y = nuvirdi)) + geom_point()
+preal <- preal + xlab("Predicted Values") + ylab("outcome") + labs(title = "Scatterplot of outcome vs. Predicted Values")
+preal <- preal + geom_line(aes(x = diag_realscale$`.fitted`, y = best_fit_line), color = "red")
+preal 
+```
+
+#### Multicollinearity between the numerical variables in the model fit
+
+```{r}
+train_subset <- train[,c("nuvirdi", "einflm", "age")]
+train_subset <- train_subset[complete.cases(train_subset),]
+cor(train_subset) > 0.9
+```
+
+
+
+#### Standard Residuals
+```{r}
+res_sd <- summary(fit)$sigma #residual std of the lm fit
+fit$sigma
+```
+sigma represents the difference between the observed response values and the values predicted by the model
+
+```{r}
+res_index <- ggplot(diag, aes(x = seq(1:length(.resid)), y = .resid)) + geom_point()
+res_index <- res_index + geom_hline(yintercept = 0, col = "red", linetype = "dashed")
+res_index <- res_index + geom_hline(yintercept = 2 * res_sd, col = "blue", linetype = "dashed")
+res_index <- res_index + geom_hline(yintercept = -2 * res_sd, col = "blue",
+linetype = "dashed")
+res_index <- res_index + geom_hline(yintercept = 3 * res_sd, col = "green",
+linetype = "dashed")
+res_index <- res_index + geom_hline(yintercept = -3 * res_sd, col = "green",
+linetype = "dashed")
+res_index <- res_index + xlab("Index") + ylab("Standard Residuals") + labs(title = "Index plot of standardized residuals")
+res_index <- res_index + geom_text(aes(label = ifelse(abs(.resid) > 2 * res_sd,
+.index, "")), hjust = -0.5, vjust = 0.4)
+res_index
+outcome_std_res <- which(abs(diag$.resid)>3 * res_sd)
+sum(abs(diag$.resid)>3 * res_sd)
+standardizedres6 <- length(diag$.resid)
+```
+
+#### Leverage
+
+```{r}
+p<-length(coef(fit)) # number of parameters
+n<-length(fitted(fit)) # number of observations
+lev_index<-ggplot(diag, aes(x=seq(1:length(.hat)),y=.hat))+geom_point()
+#.hat values are the leverages 
+
+lev_index<-lev_index+geom_hline(yintercept=2*p/n, col="red", linetype="dashed")
+lev_index<-lev_index+xlab("Index")+ylab("Leverages")
+lev_index<-lev_index+geom_text(aes(label=ifelse(.hat>2*p/n,.index,"")),hjust=0, vjust=0)
+lev_index
+outcome_leverage <- which(diag$.hat>2*p/n) #maybe try 3?
+sum(diag$.hat>2*p/n)
+```
+
+
+##### Studentized
+```{r}
+Stres_sd <- sd(diag$.stdresid, na.rm = TRUE)
+p3 <- ggplot(diag,aes(x=seq(1:length(.stdresid)),y=.stdresid))+geom_point()
+p3 <- p3 + geom_hline(yintercept=0, col="red", linetype="dashed")
+p3 <- p3 + geom_hline(yintercept=2*Stres_sd, col="blue", linetype="dashed")
+p3 <- p3 + geom_hline(yintercept=-2*Stres_sd, col="blue", linetype="dashed")
+p3 <- p3 + geom_hline(yintercept=3*Stres_sd, col="green", linetype="dashed")
+p3 <- p3 + geom_hline(yintercept=-3*Stres_sd, col="green", linetype="dashed")
+p3 <- p3 + xlab("Index")+ylab("Studentized residuals")+labs(title = "Index plot of Studentized residuals.")
+p3 <- p3 + geom_text(aes(label=ifelse(abs(.stdresid)>2*Stres_sd,.index,"")),hjust=-0.5, vjust=0.4)
+p3
+outcome_student_res <- which(abs(diag$.stdresid)>3*Stres_sd)
+sum(abs(diag$.stdresid)>3*Stres_sd)
+```
+
+##### Jacknife Residuals
+```{r}
+# Add jackknife residuals to diag dataframe
+diag$.jack <- rstudent(fit)
+jackres <- diag$.jack[!is.na(diag$.jack)]
+jackindex <- diag$.index[!is.na(diag$.jack)]
+
+
+# Jackknife index plot
+p4 <-
+  ggplot(diag, aes(
+    x = seq(1:length(.jack)),
+    y = .jack,
+    na.rm = TRUE
+  )) + geom_point()
+p4 <- p4 + geom_hline(yintercept = 0,
+                      col = "red",
+                      linetype = "dashed")
+p4 <- p4 + xlab("Index") + ylab("Jackknife residuals")
+p4 <-
+  p4 + geom_text(aes(label = ifelse(abs(.jack) > 3, .index, "")), hjust =
+                   -0.1)
+p4
+outcome_jack_res <- which(diag$.jack > 3)
+sum(diag$.jack > 3)
+```
+
+##### Bonferroni Correction & Hypothesis testing
+
+```{r}
+jack <- which(diag$.jack > 3) # indices of the jack residuals that are greater than 3 
+df <- length(jackres) - length(summary(fit)$coefficients[,1]) - 1
+
+j = 1
+x = c() # empty vector to store all of the pvalues that represent the probability of observing a value equal to or more extreme than the absolute value of each jackknife residual
+
+for (i in jack) {
+  x[j] <- 2 * (1 - pt(abs(diag$.jack[i]), df))
+  # two-tailed p-value for the observation's absolute value of "diag$.jack[i]" is calculated using the "pt()" function and scaled by 2
+  
+  j = j + 1
+}
+
+alpha <- 0.05 #normal alpha level
+bonf <- alpha / length(diag$.jack) #bonferroni corrected alpha level
+bonfprob <- c(x, bonf)
+
+bonfprob_v <- bonfprob < bonf # which pval are smaller than the bonferroni corrected alpha 
+
+#cbind(jack, bonfprob_v) # 1 is smaller, 0 is not smaller 
+
+which(bonfprob_v == 1) #which ones are smaller?
+
+outcome_outliers_jack = jack[which(bonfprob_v == 1)] #all the jacknife res that are smalled than the bonferroni corrected alpha are saved here
+
+```
+
+##### Cook's Distance
+
+```{r}
+p5 <- ggplot(diag, aes(x=seq(1:length(.cooksd)),y=.cooksd, na.rm = TRUE))+geom_point()
+p5 <- p5 + xlab("Index")+ylab("Cooks distance") + theme(legend.position="none")
+p5 <- p5 + geom_text(aes(label=ifelse(abs(.cooksd)>0.021,.index,"")))
+p5
+
+outcome_cook <- which(diag$.cooksd >0.021)
+
+#intersection between cook and outcome_outliers_jack
+outcome_intersection <- intersect(outcome_outliers_jack, outcome_cook)
+print(outcome_intersection)
+
+```
+
+```{r}
+outcome_outlier1 <- train[outcome_outliers_jack, ] %>% 
+  pull(ROWID)
+
+outcome_outlier2 <- train[outcome_cook, ] %>% 
+  pull(ROWID)
+
+complete_data_out5 <- complete_data_out4 %>% 
+  filter(!ROWID %in% c(outcome_outlier1, outcome_outlier2))
+``` 
+
+# EDA complete_data_out5 
+
+## 1. Tegund "Einbýli", "Fjölbýli", "Sérbýli"
+
+### poa vs. tegund boxplot
+```{r}
+ggplot(data = complete_data_out5, aes(x = tegund, y = outcome)) + 
+  geom_boxplot() + 
+  facet_wrap(~tegund, scales = "free_x") + 
+  xlab("Tegund") + 
+  ylab("POA") + 
+  ggtitle("POA vs Tegund")
+```
+
+### fm_verd and poa
+```{r}
+ggplot(complete_data_out5, aes(x = fm_verd, y = outcome, color = tegund)) +
+  geom_point() +
+  xlab("fm verd") +
+  ylab("POA") +
+  ggtitle("Relationship between fm verd and POA") +
+  scale_color_discrete(name = "Tegund")
+```
+
+### einflm vs. poa by tegund
+```{r}
+ggplot(complete_data_out5, aes(x = einflm, y = outcome, color = tegund)) +
+  geom_point() +
+  xlab("meters squared") +
+  ylab("POA") +
+  ggtitle("Relationship between property size and POA") +
+  scale_color_discrete(name = "Tegund")
+```
+
+### einflm vs. poa by municipality
+```{r}
+ggplot(complete_data_out5, aes(x = einflm, y = outcome, color = sveitarfelag)) +
+  geom_point() +
+  xlab("meters squared") +
+  ylab("POA") +
+  ggtitle("Relationship between property size and POA") +
+  scale_color_discrete(name = "Sveitarfelag")
+```
+
+### age vs. POA by tegund
+```{r}
+ggplot(complete_data_out5, aes(x = age, y = outcome, color = tegund)) +
+  geom_point() +
+  xlab("age") +
+  ylab("POA") +
+  ggtitle("Relationship between property size and POA") +
+  scale_color_discrete(name = "Tegund")
+```
+
+
+### einflm vs. poa by municipality
+
+```{r}
+complete_data_out5 %>% 
+  ggplot(aes(x = einflm, y = outcome)) +
+  geom_line(color = "red") +
+  #geom_line(aes(x = einflm, y = outcome), data = housesales_c, color = "blue") +
+  labs(x = NULL, y = NULL) +
+  facet_wrap(~sveitarfelag, scales = "free_y") +
+  theme_test()
+```
+
+
+### age vs poa by municipality
+```{r}
+complete_data_out5 %>% 
+  ggplot(aes(x = age, y = outcome)) +
+  geom_line(color = "red") +
+  #geom_line(aes(x = age, y = outcome), data = housesales_c, color = "blue") +
+  labs(x = NULL, y = NULL) +
+  facet_wrap(~sveitarfelag, scales = "free_y") +
+  theme_test()
+```
+
+### DATE VS. FM_VERD VS. SVEITARFELAG
+```{r}
+
+complete_data_out5 %>% 
+  ggplot(aes(x = Date, y = fm_verd, color = sveitarfelag)) +
+  geom_line() +
+  facet_wrap(~sveitarfelag) +
+  theme_test() +
+  theme(legend.position = "none")
+
+```
+
+
+### DATE VS. outcome VS. SVEITARFELAG
+```{r}
+
+complete_data_out5 %>% 
+  ggplot(aes(x = Date, y = outcome, color = sveitarfelag)) +
+  geom_line() +
+  facet_wrap(~sveitarfelag) +
+  theme_test() +
+  theme(legend.position = "none")
+
+```
+# 5. Outlier Analysis (outlier distribution)
+```{r}
+# combine these newly identified outliers into the same dataset as before 
+additional_rows5 <- housesales_c %>% 
+  filter(ROWID %in% c(outcome_outlier1, outcome_outlier2))
+
+outliers_dataset <- rbind(outliers_dataset, additional_rows5)
+summary(outliers_dataset)
+
+library(ggplot2)
+
+ggplot(outliers_dataset, aes(x = ROWID, y = outcome)) +
+  geom_point() +
+  labs(title = "Outliers Visualization",
+       x = "ROWID",
+       y = "outcome")
+
+```
+
+
+# Model Fiting 7
+
+## Outcome
+### train & test split
+
+```{r}
+complete_data_out5$nuvirdi = complete_data_out5$outcome
+complete_data_out5$index2 <- c(1:length(complete_data_out5$nuvirdi))
+
+set.seed(123) #sets the seed for random number generation
+train <- sample_frac(complete_data_out5, 3/4) # split data into train and test
+test <- complete_data_out5[-train$index2,]
+train_index <- c(1:length(train$nuvirdi)) #assign indices to each data point
+train$index <- train_index 
+test_index <- c(1:length(test$nuvirdi)) #assign indices to each data point
+test$index <- test_index 
+```
+
+### lm 1 outcome
+```{r}
+fit <- lm(nuvirdi ~ tegund + sveitarfelag + einflm + age, train) #model
+summary(fit)
+vif(fit)
+```
+### RSS ESS Total 
+```{r}
+fitted_values <- fitted(fit)
+mean_response <- mean(fit$residuals)
+RSS6 <- sum((fitted_values - mean_response)^2)
+RSS6
+
+residuals <- fit$residuals
+ESS6 <- sum(residuals^2)
+ESS6
+
+TSS6 <- ESS6 + RSS6
+TSS6
+
+anova(fit)
+```
+#### fit scaled
+
+```{r}
+fit_scaled <- lm(nuvirdi ~ tegund + sveitarfelag + scale(einflm) + scale(age), train) 
+summary(fit_scaled)
+```
+
+```{r}
+diag <- fortify(fit)
+diag$.index = c(1:length(diag$.resid)) 
+#  new column .index in the diag data frame and assigns it values ranging from 1 to the number of elements in the residuals of the model (.resid)
+
+diag$.jack<-rstudent(fit) 
+#a new column .jack in the diag data frame and assigns it the jackknife residuals of the model, obtained using the rstudent() function 
+```
+ 
+##### fig1c
+```{r}
+fit <- lm(nuvirdi ~ tegund + sveitarfelag + einflm + age, train) #model
+diag_realscale <- fortify(fit) # makes lm info easier to use because it converts the lm object to a dataframe
+
+fit1 <- lm(nuvirdi ~ .fitted, data = diag_realscale)
+summary(fit1)
+intercept <- coef(fit1)[1]
+slope <- coef(fit1)[2]
+
+best_fit_line <- intercept + slope * diag_realscale$`.fitted`
+#slope times the predicted values of the dataset aka (.fitted)
+
+preal <- ggplot(diag_realscale, aes(x = .fitted, y = nuvirdi)) + geom_point()
+preal <- preal + xlab("Predicted Values") + ylab("Outcome") + labs(title = "Scatterplot of Outcome vs. Predicted Values")
+preal <- preal + geom_line(aes(x = diag_realscale$`.fitted`, y = best_fit_line), color = "red")
+preal 
+
+ggsave("FIG1C.png", preal, dpi = 300, width = 8, height = 6, units = "in")
+```
+
+
+
+
+#### Multicollinearity between the numerical variables in the model fit
+
+```{r}
+train_subset <- train[,c("nuvirdi", "einflm", "age")]
+train_subset <- train_subset[complete.cases(train_subset),]
+cor(train_subset) > 0.9
+```
+
+
+
+#### Standard Residuals
+```{r}
+res_sd <- summary(fit)$sigma #residual std of the lm fit
+fit$sigma
+```
+sigma represents the difference between the observed response values and the values predicted by the model
+
+##### fig2c
+```{r}
+res_index <- ggplot(diag, aes(x = seq(1:length(.resid)), y = .resid)) + geom_point()
+res_index <- res_index + geom_hline(yintercept = 0, col = "red", linetype = "dashed")
+res_index <- res_index + geom_hline(yintercept = 2 * res_sd, col = "blue", linetype = "dashed")
+res_index <- res_index + geom_hline(yintercept = -2 * res_sd, col = "blue",
+linetype = "dashed")
+res_index <- res_index + geom_hline(yintercept = 3 * res_sd, col = "green",
+linetype = "dashed")
+res_index <- res_index + geom_hline(yintercept = -3 * res_sd, col = "green",
+linetype = "dashed")
+res_index <- res_index + xlab("Index") + ylab("Standard Residuals") + labs(title = "Index plot of standardized residuals")
+res_index <- res_index + geom_text(aes(label = ifelse(abs(.resid) > 2 * res_sd,
+.index, "")), hjust = -0.5, vjust = 0.4)
+res_index
+outcome_std_res <- which(abs(diag$.resid)>3 * res_sd)
+sum(abs(diag$.resid)>3 * res_sd)
+standardizedres7 <- length(diag$.resid)
+ggsave("FIG2C.png", res_index, dpi = 300, width = 8, height = 6, units = "in")
+```
+
+#### Leverage
+##### fig3c
+```{r}
+p<-length(coef(fit)) # number of parameters
+n<-length(fitted(fit)) # number of observations
+lev_index<-ggplot(diag, aes(x=seq(1:length(.hat)),y=.hat))+geom_point()
+#.hat values are the leverages 
+
+lev_index<-lev_index+geom_hline(yintercept=2*p/n, col="red", linetype="dashed")
+lev_index<-lev_index+xlab("Index")+ylab("Leverages")
+lev_index<-lev_index+geom_text(aes(label=ifelse(.hat>2*p/n,.index,"")),hjust=0, vjust=0)
+lev_index
+outcome_leverage <- which(diag$.hat>2*p/n) #maybe try 3?
+sum(diag$.hat>2*p/n)
+
+ggsave("FIG3C.png", lev_index, dpi = 300, width = 8, height = 6, units = "in")
+```
+
+
+##### Studentized
+#### fig4c
+```{r}
+Stres_sd <- sd(diag$.stdresid, na.rm = TRUE)
+p3 <- ggplot(diag,aes(x=seq(1:length(.stdresid)),y=.stdresid))+geom_point()
+p3 <- p3 + geom_hline(yintercept=0, col="red", linetype="dashed")
+p3 <- p3 + geom_hline(yintercept=2*Stres_sd, col="blue", linetype="dashed")
+p3 <- p3 + geom_hline(yintercept=-2*Stres_sd, col="blue", linetype="dashed")
+p3 <- p3 + geom_hline(yintercept=3*Stres_sd, col="green", linetype="dashed")
+p3 <- p3 + geom_hline(yintercept=-3*Stres_sd, col="green", linetype="dashed")
+p3 <- p3 + xlab("Index")+ylab("Studentized residuals")+labs(title = "Index plot of Studentized residuals.")
+p3 <- p3 + geom_text(aes(label=ifelse(abs(.stdresid)>2*Stres_sd,.index,"")),hjust=-0.5, vjust=0.4)
+p3
+outcome_student_res <- which(abs(diag$.stdresid)>3*Stres_sd)
+sum(abs(diag$.stdresid)>3*Stres_sd)
+
+ggsave("FIG4C.png", p3, dpi = 300, width = 8, height = 6, units = "in")
+```
+
+##### Jacknife Residuals
+##### fig5c
+```{r}
+# Add jackknife residuals to diag dataframe
+diag$.jack <- rstudent(fit)
+jackres <- diag$.jack[!is.na(diag$.jack)]
+jackindex <- diag$.index[!is.na(diag$.jack)]
+
+
+# Jackknife index plot
+p4 <-
+  ggplot(diag, aes(
+    x = seq(1:length(.jack)),
+    y = .jack,
+    na.rm = TRUE
+  )) + geom_point()
+p4 <- p4 + geom_hline(yintercept = 0,
+                      col = "red",
+                      linetype = "dashed")
+p4 <- p4 + xlab("Index") + ylab("Jackknife residuals")
+p4 <-
+  p4 + geom_text(aes(label = ifelse(abs(.jack) > 3, .index, "")), hjust =
+                   -0.1)
+p4
+outcome_jack_res <- which(diag$.jack > 3)
+sum(diag$.jack > 3)
+
+ggsave("FIG5C.png", p4, dpi = 300, width = 8, height = 6, units = "in")
+```
+
+##### Bonferroni Correction & Hypothesis testing
+
+```{r}
+jack <- which(diag$.jack > 3) # indices of the jack residuals that are greater than 3 
+df <- length(jackres) - length(summary(fit)$coefficients[,1]) - 1
+
+j = 1
+x = c() # empty vector to store all of the pvalues that represent the probability of observing a value equal to or more extreme than the absolute value of each jackknife residual
+
+for (i in jack) {
+  x[j] <- 2 * (1 - pt(abs(diag$.jack[i]), df))
+  # two-tailed p-value for the observation's absolute value of "diag$.jack[i]" is calculated using the "pt()" function and scaled by 2
+  
+  j = j + 1
+}
+
+alpha <- 0.05 #normal alpha level
+bonf <- alpha / length(diag$.jack) #bonferroni corrected alpha level
+bonfprob <- c(x, bonf)
+
+bonfprob_v <- bonfprob < bonf # which pval are smaller than the bonferroni corrected alpha 
+
+#cbind(jack, bonfprob_v) # 1 is smaller, 0 is not smaller 
+
+which(bonfprob_v == 1) #which ones are smaller?
+
+outcome_outliers_jack = jack[which(bonfprob_v == 1)] #all the jacknife res that are smalled than the bonferroni corrected alpha are saved here
+
+```
+
+##### Cook's Distance
+##### Fig6C
+```{r}
+p5 <- ggplot(diag, aes(x=seq(1:length(.cooksd)),y=.cooksd, na.rm = TRUE))+geom_point()
+p5 <- p5 + xlab("Index")+ylab("Cooks distance") + theme(legend.position="none")
+p5 <- p5 + geom_text(aes(label=ifelse(abs(.cooksd)>0.021,.index,"")))
+p5
+
+outcome_cook <- which(diag$.cooksd >0.021)
+
+#intersection between cook and outcome_outliers_jack
+outcome_intersection <- intersect(outcome_outliers_jack, outcome_cook)
+print(outcome_intersection)
+
+ggsave("FIG6C.png", p5, dpi = 300, width = 8, height = 6, units = "in")
+```
+
+```{r}
+outcome_outlier1 <- train[outcome_outliers_jack, ] %>% 
+  pull(ROWID)
+
+outcome_outlier2 <- train[outcome_cook, ] %>% 
+  pull(ROWID)
+
+complete_data_out6 <- complete_data_out5 %>% 
+  filter(!ROWID %in% c(outcome_outlier1, outcome_outlier2))
+``` 
+
+# Plan
+1. merge interest rate and rental inventory columns to the complete_data_out6 dataset; importing the leiguskra dataset doesnt work automatically
+
+2. scatterplots with pearson correlation values for all independent variables
+
+3. fit a linear model with all of the predictors that are linear plus yearly, monthly, and daily affect (to do this I would need a year, month, and day column)
+
+# rental prices
+```{r}
+leiguskra <- read_delim("leiguskra.csv", delim = ";", escape_double = FALSE, trim_ws = TRUE)
+
+# number of properties for rent in the month and year
+# the number of properties for sale within a municipality
+rental_price_c <- leiguskra %>%
+  mutate(Date = dmy_hm(THINGLYSTDAGS)) %>% 
+  mutate(Year = year(Date),
+         Month = month(Date)) %>% 
+  group_by(Year, Month, SVEITARFELAG) %>%
+  summarise(Inventory = n()) %>%
+  ungroup() %>% 
+  dplyr::select(Year, Month, SVEITARFELAG, Inventory) %>%
+  mutate(SVEITARFELAG = gsub(" ", "", SVEITARFELAG)) %>%
+  filter(SVEITARFELAG %in% municipalities) %>% #not filtering because the excel sheet has accents
+  arrange(Year, Month) 
+```
+# interest rates
+```{r}
+interest_rate <-
+  read_delim(
+    "meginvextir_US_Date.csv",
+    delim = ";",
+    escape_double = FALSE,
+    locale = locale(grouping_mark = "."),
+    trim_ws = TRUE
+  )
+
+interest_rate
+```
+# Bind data sets
+```{r}
+full_data <- complete_data_out6 %>%
+  mutate(Year = year(Date),
+         Month = month(Date)) %>% 
+  inner_join(rental_price_c,
+           by = c("Year" = "Year", "Month" = "Month", "sveitarfelag" = "SVEITARFELAG")) %>%
+  inner_join(interest_rate, by = c("Date" = "date")) %>%
+  distinct() %>% 
+  mutate(DoM = lubridate::day(Date),
+         DoY = lubridate::yday(Date))
+
+dataset <- full_data %>% 
+  dplyr::select(-c(ROWID, nuvirdi, index2)) %>% 
+  mutate(tegund = as.factor(tegund),
+         sveitarfelag = as.factor(sveitarfelag))
+
+
+save(dataset, file = "Full_cleaned_data.RData")
+
+```
+
+```{r}
+data <- get(load("Full_cleaned_data.RData"))
+data
+```
+
+
+
+```{r}
+normalqqplot <- function(x){
+  alpha <- 0.05   # set alpha here
+  n <- length(x)
+  pplot <- (1:n)/(n + 1)
+  plow <- qbeta(alpha/2,(1:n),n-(1:n)+1)
+  pupp <- qbeta(1-alpha/2,(1:n),n-(1:n)+1)
+  qqnorm <- qnorm(pplot)
+  qx_low <- qnorm(plow)
+  qx_upp <- qnorm(pupp)
+  e = (x - mean(x))/sd(x)
+  e_sort <- sort(e)
+  index_e = order(e)
+  figout <- ggplot(data=NULL,aes(x=qqnorm, y=e_sort)) + geom_point() 
+  figout <- figout + geom_line(y = qx_low) + geom_line(y = qx_upp)+geom_line(y = qqnorm) 
+  figout <- figout + xlab("Standard normal quantiles")+ylab("Standardized residuals")
+  figout  <- figout  + geom_text(aes(label = ifelse(e_sort > qx_upp, index_e, "")), hjust = -0.5, vjust=0.4)
+  figout  <- figout  + geom_text(aes(label = ifelse(e_sort < qx_low, index_e, "")), hjust = -0.5, vjust=0.4)
+  figout
+  return(figout)
+}
+
+tqqplot <- function(x,df){
+  alpha <- 0.05  # set alpha here
+  n <- length(x)
+  pplot <- (1:n)/(n + 1)
+  plow <- qbeta(alpha/2,(1:n),n-(1:n)+1)
+  pupp <- qbeta(1-alpha/2,(1:n),n-(1:n)+1)
+  qqt <- qt(pplot,df)
+  qqt_low <- qt(plow,df)
+  qqt_upp <- qt(pupp,df)
+  e_sort <- sort(x)
+  index_e = order(x)
+  figout <- ggplot(data=NULL,aes(x=qqt, y=e_sort)) + geom_point() 
+  figout <- figout + geom_line(y = qqt_low) + geom_line(y = qqt_upp)+geom_line(y = qqt) 
+  figout <- figout + xlab("Standard t quantiles")+ylab("Studentized residuals")
+  figout  <- figout  + geom_text(aes(label = ifelse(e_sort > qqt_upp, index_e, "")), hjust = -0.5, vjust=0.4)
+  figout  <- figout  + geom_text(aes(label = ifelse(e_sort < qqt_low, index_e, "")), hjust = -0.5, vjust=0.4)
+  figout
+  return(figout)
+}
+
+
+
+```
+
+
+# Linearity Assumption: relationship between the independent variables and the dependent variable
+
+plot the residuals (the differences between the observed and predicted values) against the independent variables. If the residuals are randomly scattered around zero with no discernible pattern, it suggests a linear relationship. Patterns in the residual plot, such as a curved shape or a funnel-like pattern, indicate nonlinearity.
+```{r}
+model1 <- lm(outcome ~ tegund + sveitarfelag + einflm + age + Sales, complete_data_out6) #model
+diag_realscale <- fortify(model1) # makes lm info easier to use because it converts the lm object to a dataframe
+
+model1_assumptions <- lm(outcome ~ .fitted, data = diag_realscale)
+summary(model1_assumptions)
+
+# independence assumption - each observation is a sale not related to the other sales 
+
+vif(model1) # multicollinearity assumption; no # higher than 5
+
+#linearity assumption: residuals are randomly scattered around zero with no discernible pattern = linear relationship
+preal <- ggplot(diag_realscale, aes(x = .fitted, y = outcome)) + geom_point()
+preal <- preal + xlab("Predicted Values") + ylab("outcome") + labs(title = "Scatterplot of outcome vs. Predicted Values")
+preal 
+
+# normality assumption
+# Obtain the residuals
+residuals_assumptions <- residuals(model1)
+hist(residuals_assumptions, main = "Histogram of Residuals")
+qqnorm(residuals_assumptions)
+qqline(residuals_assumptions)
+
+
+#endogeneity assumption
+#necessary?
+#Granger causality test?
+```
+
+
+
+# EDA complete_data_out6 
+
+## 1. Tegund "Einbýli", "Fjölbýli", "Sérbýli"
+
+### poa vs. tegund boxplot
+```{r}
+ggplot(data = complete_data_out6, aes(x = tegund, y = outcome)) + 
+  geom_boxplot() + 
+  facet_wrap(~tegund, scales = "free_x") + 
+  xlab("Tegund") + 
+  ylab("POA") + 
+  ggtitle("POA vs Tegund")
+```
+
+### fm_verd and poa
+```{r}
+ggplot(complete_data_out6, aes(x = fm_verd, y = outcome, color = tegund)) +
+  geom_point() +
+  xlab("fm verd") +
+  ylab("POA") +
+  ggtitle("Relationship between fm verd and POA") +
+  scale_color_discrete(name = "Tegund")
+```
+
+### einflm vs. poa by tegund
+```{r}
+ggplot(complete_data_out6, aes(x = einflm, y = outcome, color = tegund)) +
+  geom_point() +
+  xlab("meters squared") +
+  ylab("POA") +
+  ggtitle("Relationship between property size and POA") +
+  scale_color_discrete(name = "Tegund")
+```
+
+### einflm vs. poa by municipality
+```{r}
+ggplot(complete_data_out6, aes(x = einflm, y = outcome, color = sveitarfelag)) +
+  geom_point() +
+  xlab("meters squared") +
+  ylab("POA") +
+  ggtitle("Relationship between property size and POA") +
+  scale_color_discrete(name = "Sveitarfelag")
+```
+
+### age vs. POA by tegund
+```{r}
+ggplot(complete_data_out6, aes(x = age, y = outcome, color = tegund)) +
+  geom_point() +
+  xlab("age") +
+  ylab("POA") +
+  ggtitle("Relationship between property size and POA") +
+  scale_color_discrete(name = "Tegund")
+```
+
+
+### einflm vs. poa by municipality
+
+```{r}
+complete_data_out6 %>% 
+  ggplot(aes(x = einflm, y = outcome)) +
+  geom_line(color = "red") +
+  #geom_line(aes(x = einflm, y = outcome), data = housesales_c, color = "blue") +
+  labs(x = NULL, y = NULL) +
+  facet_wrap(~sveitarfelag, scales = "free_y") +
+  theme_test()
+```
+
+
+### age vs poa by municipality
+```{r}
+complete_data_out6 %>% 
+  ggplot(aes(x = age, y = outcome)) +
+  geom_line(color = "red") +
+  #geom_line(aes(x = age, y = outcome), data = housesales_c, color = "blue") +
+  labs(x = NULL, y = NULL) +
+  facet_wrap(~sveitarfelag, scales = "free_y") +
+  theme_test()
+```
+
+### DATE VS. FM_VERD VS. SVEITARFELAG
+```{r}
+
+complete_data_out6 %>% 
+  ggplot(aes(x = Date, y = fm_verd, color = sveitarfelag)) +
+  geom_line() +
+  facet_wrap(~sveitarfelag) +
+  theme_test() +
+  theme(legend.position = "none")
+
+```
+
+
+### DATE VS. outcome VS. SVEITARFELAG
+```{r}
+
+complete_data_out6 %>% 
+  ggplot(aes(x = Date, y = outcome, color = sveitarfelag)) +
+  geom_line() +
+  facet_wrap(~sveitarfelag) +
+  theme_test() +
+  theme(legend.position = "none")
+
+```
+
+
+
+
+
+# 6. Outlier Analysis (outlier distribution)
+```{r}
+# combine these newly identified outliers into the same dataset as before 
+additional_rows6 <- housesales_c %>% 
+  filter(ROWID %in% c(outcome_outlier1, outcome_outlier2))
+
+outliers_dataset <- rbind(outliers_dataset, additional_rows6)
+summary(outliers_dataset)
+
+write_xlsx(outliers_dataset, "outliers_dataset.xlsx")
+save(outliers_dataset, file = "outliers_dataset.RData")
+
+library(ggplot2)
+
+ggplot(outliers_dataset, aes(x = ROWID, y = outcome)) +
+  geom_point() +
+  labs(title = "Outliers Visualization",
+       x = "ROWID",
+       y = "outcome")
+
+```
